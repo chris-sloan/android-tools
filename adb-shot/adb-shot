@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# adb-shot: take a screenshot on an Android device and save it to your Mac.
+set -eo pipefail
+
+# --- Defaults (edit these to taste) ------------------------------------------
+outdir="$HOME/Desktop"  # where screenshots are saved
+copy=1                  # 1 = also copy the image to the clipboard
+open_after=0            # 1 = open the image in Preview afterwards
+delay=0                 # seconds to wait before taking the shot
+
+usage() {
+  cat <<EOF
+Usage: adb-shot [-d seconds] [-n count] [-o dir] [-D display] [-c|-C] [-p] [-L] [name]
+
+  name        Filename, e.g. "basket-overlap" (.png added if missing).
+              Defaults to screenshot-<model>-<timestamp>.png.
+              Never overwrites: adds -2, -3, ... if the file exists.
+  -d seconds  Countdown before the shot, to get the screen ready (default $delay)
+  -n count    Take several shots, one per Enter press (e.g. step-by-step bugs)
+  -o dir      Where to save (default $outdir)
+  -D id       Display to capture on multi-screen devices (e.g. foldables)
+  -L          List the device's display IDs and exit
+  -c / -C     Copy / don't copy the image to the clipboard (default: copy)
+  -p          Open the image in Preview afterwards
+  -h          Show this help
+EOF
+}
+
+count=1
+display=""
+list_displays=0
+
+while getopts "d:n:o:D:LcCph" opt; do
+  case $opt in
+    d) delay=$OPTARG ;;
+    n) count=$OPTARG ;;
+    o) outdir=$OPTARG ;;
+    D) display=$OPTARG ;;
+    L) list_displays=1 ;;
+    c) copy=1 ;;
+    C) copy=0 ;;
+    p) open_after=1 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+name=${1:-}
+if (( $# > 1 )); then
+  echo "Too many arguments; quote names that contain spaces." >&2
+  exit 1
+fi
+
+command -v adb >/dev/null || { echo "adb not found on PATH." >&2; exit 1; }
+
+# --- Pick a device -----------------------------------------------------------
+serials=()
+while read -r s state _; do
+  [[ $state == "device" ]] && serials+=("$s")
+done < <(adb devices | tail -n +2)
+
+model_of() { adb -s "$1" shell getprop ro.product.model | tr -d '\r'; }
+
+if (( ${#serials[@]} == 0 )); then
+  echo "No devices connected (check 'adb devices' for unauthorized ones)." >&2
+  exit 1
+elif (( ${#serials[@]} == 1 )); then
+  serial=${serials[0]}
+else
+  labels=()
+  for s in "${serials[@]}"; do labels+=("$(model_of "$s")  [$s]"); done
+  echo "Select a device:"
+  PS3="> "
+  select _ in "${labels[@]}"; do
+    if [[ $REPLY =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= ${#serials[@]} )); then
+      serial=${serials[REPLY-1]}
+      break
+    fi
+  done
+  [[ -n $serial ]] || exit 1
+fi
+
+dev() { adb -s "$serial" "$@"; }
+model=$(model_of "$serial")
+
+if (( list_displays )); then
+  dev shell dumpsys SurfaceFlinger --display-id | tr -d '\r'
+  exit 0
+fi
+
+# --- Work out the filename(s) -------------------------------------------------
+[[ -n $name ]] && base=${name%.png} || base="screenshot-${model// /-}-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$outdir"
+
+next_file() {
+  local f="$outdir/$1.png" n=2
+  while [[ -e $f ]]; do f="$outdir/$1-$n.png"; n=$((n + 1)); done
+  echo "$f"
+}
+
+# On multi-screen devices (foldables), screencap needs a display ID; without one
+# it prints a warning into the PNG and may grab a screen that's switched off.
+# Pick whichever physical display is currently powered on.
+if [[ -z $display ]]; then
+  display=$(dev shell dumpsys SurfaceFlinger | tr -d '\r' \
+    | awk '/^Display [0-9]+$/ { id = $2 } /powerMode=On/ && id && !found { found = id } END { print found }')
+fi
+
+shoot() {
+  local file=$1
+  local args=(-p)
+  [[ -n $display ]] && args+=(-d "$display")
+  if ! dev exec-out screencap "${args[@]}" > "$file"; then
+    rm -f "$file"
+    echo "Screenshot failed." >&2
+    exit 1
+  fi
+  # Strip any text screencap printed before the PNG data, then sanity-check it.
+  perl -0777 -pi -e 's/\A.*?(?=\x89PNG)//s' "$file"
+  if [[ $(head -c 4 "$file" | xxd -p) != "89504e47" ]]; then
+    rm -f "$file"
+    echo "Screenshot failed: the device didn't return a PNG." >&2
+    exit 1
+  fi
+  echo "Saved: $file"
+}
+
+countdown() {
+  local i
+  for (( i = delay; i > 0; i-- )); do printf '\r%s... ' "$i"; sleep 1; done
+  (( delay > 0 )) && printf '\r      \r'
+  return 0
+}
+
+# --- Take the shot(s) ----------------------------------------------------------
+files=()
+for (( i = 1; i <= count; i++ )); do
+  if (( count > 1 )); then
+    read -r -p "Shot $i/$count: press Enter to capture... " _ </dev/tty
+    file=$(next_file "$base-$i")
+  else
+    file=$(next_file "$base")
+  fi
+  countdown
+  shoot "$file"
+  files+=("$file")
+done
+
+last=${files[${#files[@]}-1]}
+if (( copy )); then
+  osascript -e "set the clipboard to (read (POSIX file \"$last\") as «class PNGf»)" \
+    && echo "Copied to clipboard."
+fi
+(( open_after )) && open "${files[@]}"
+exit 0

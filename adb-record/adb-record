@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# adb-record: record an Android device's screen, pull the video to your Mac,
+# then delete it from the device.
+set -eo pipefail
+
+# --- Defaults (edit these to taste) ------------------------------------------
+show_taps=1             # 1 = show taps while recording, 0 = don't
+limit=0                 # seconds, max 180; 0 = unlimited (Android 14+, else 180)
+outdir="$HOME/Desktop"  # where videos are saved
+
+usage() {
+  cat <<EOF
+Usage: adb-record [-T] [-l seconds] [-o dir] [name]
+
+  name        Filename for the video, e.g. "checkout-crash" (.mp4 is added
+              if missing). Defaults to screenrecord-<model>-<timestamp>.mp4.
+              Never overwrites: adds -2, -3, ... if the file already exists.
+
+Taps are shown while recording by default; your device setting is
+restored afterwards.
+
+  -T          Don't show taps for this recording
+  -l seconds  Time limit, max 180 (default $limit; 0 = unlimited on Android 14+,
+              falls back to 180 on older devices)
+  -o dir      Where to save the video (default $outdir)
+  -h          Show this help
+
+Press Enter or Ctrl+C to stop recording.
+EOF
+}
+
+while getopts "tTl:o:h" opt; do
+  case $opt in
+    t) show_taps=1 ;;
+    T) show_taps=0 ;;
+    l) limit=$OPTARG ;;
+    o) outdir=$OPTARG ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+name=${1:-}
+if (( $# > 1 )); then
+  echo "Too many arguments; quote names that contain spaces." >&2
+  exit 1
+fi
+
+command -v adb >/dev/null || { echo "adb not found on PATH." >&2; exit 1; }
+
+# --- Pick a device -----------------------------------------------------------
+serials=()
+while read -r s state _; do
+  [[ $state == "device" ]] && serials+=("$s")
+done < <(adb devices | tail -n +2)
+
+model_of() { adb -s "$1" shell getprop ro.product.model | tr -d '\r'; }
+
+if (( ${#serials[@]} == 0 )); then
+  echo "No devices connected (check 'adb devices' for unauthorized ones)." >&2
+  exit 1
+elif (( ${#serials[@]} == 1 )); then
+  serial=${serials[0]}
+else
+  labels=()
+  for s in "${serials[@]}"; do labels+=("$(model_of "$s")  [$s]"); done
+  echo "Select a device:"
+  PS3="> "
+  select _ in "${labels[@]}"; do
+    if [[ $REPLY =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= ${#serials[@]} )); then
+      serial=${serials[REPLY-1]}
+      break
+    fi
+  done
+  [[ -n $serial ]] || exit 1
+fi
+
+dev() { adb -s "$serial" "$@"; }
+
+model=$(model_of "$serial")
+
+# Unlimited recording (--time-limit 0) needs Android 14 (API 34) or later.
+if [[ $limit == 0 ]]; then
+  api=$(dev shell getprop ro.build.version.sdk | tr -d '\r')
+  if [[ ! $api =~ ^[0-9]+$ ]] || (( api < 34 )); then
+    echo "Note: unlimited recording needs Android 14+ (this device is API ${api:-?}); using the 180s limit."
+    limit=180
+  fi
+fi
+stamp=$(date +%Y%m%d-%H%M%S)
+remote="/sdcard/screenrecord-$stamp.mp4"
+if [[ -n $name ]]; then
+  name=${name%.mp4}
+else
+  name="screenrecord-${model// /-}-$stamp"
+fi
+local_file="$outdir/$name.mp4"
+n=2
+while [[ -e $local_file ]]; do
+  local_file="$outdir/$name-$n.mp4"
+  n=$((n + 1))
+done
+
+# --- Show taps (restored on exit) -------------------------------------------
+prev_taps=""
+restore_taps() {
+  if [[ -n $prev_taps ]]; then
+    dev shell settings put system show_touches "$prev_taps" >/dev/null 2>&1 || true
+  fi
+}
+trap restore_taps EXIT
+
+if (( show_taps )); then
+  prev_taps=$(dev shell settings get system show_touches | tr -d '\r')
+  dev shell settings put system show_touches 1
+fi
+
+# --- Record ------------------------------------------------------------------
+# Stopping with SIGINT on the device lets screenrecord finalise the MP4.
+stop_recording() { dev shell pkill -INT screenrecord >/dev/null 2>&1 || true; }
+
+dev shell screenrecord --time-limit "$limit" "$remote" </dev/null &
+rec_pid=$!
+trap stop_recording INT
+
+echo "Recording $model... press Enter (or Ctrl+C) to stop."
+while kill -0 "$rec_pid" 2>/dev/null; do
+  if read -r -t 1 _; then
+    stop_recording
+    break
+  fi
+done
+wait "$rec_pid" 2>/dev/null || true
+trap - INT
+sleep 1  # give the device a moment to finish writing the file
+
+# --- Pull and clean up --------------------------------------------------------
+mkdir -p "$outdir"
+echo "Pulling video..."
+if dev pull "$remote" "$local_file" >/dev/null; then
+  dev shell rm -f "$remote"
+  echo "Saved: $local_file"
+else
+  echo "Pull failed; the recording is still on the device at $remote" >&2
+  exit 1
+fi
