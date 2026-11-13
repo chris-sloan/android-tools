@@ -54,7 +54,7 @@ adb-shot -D 4619827677550801153 inner-screen
 
 ## How it works
 
-1. **Picks a device**, the same way as `adb-record`: automatically if there's one, from a list if there are several.
+1. **Picks a device.** One device attached: it's used automatically. More than one: you choose from a list showing model name and serial.
 2. **Finds the active screen** from `dumpsys SurfaceFlinger` (the display whose power mode is On), unless you passed `-D`.
 3. **Captures** with `adb exec-out screencap -p`, which streams the PNG straight to your Mac. Nothing is saved on the device, so there's nothing to clean up.
 4. **Checks the file.** Any text Android prints before the image data is stripped, and the file must start with a PNG signature. If not, the script deletes it and reports an error, so you never get a file that won't open.
