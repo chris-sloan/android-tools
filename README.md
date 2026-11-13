@@ -1,6 +1,6 @@
 # Toolbox
 
-Small command-line tools for testing mobile apps and capturing evidence of bugs.
+A set of simple quality of life Android helper tools.
 
 ## Tools
 
