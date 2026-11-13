@@ -1,0 +1,9 @@
+# Code owners are automatically requested for review on pull requests.
+# See https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repository
+*                   @chris-sloan
+
+# Changes to repository settings, ownership and workflows
+/.github/           @chris-sloan
+/SECURITY.md        @chris-sloan
