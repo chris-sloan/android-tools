@@ -1,0 +1,639 @@
+#!/usr/bin/env bash
+# vid-tool: fix, shrink, compress and trim videos with ffmpeg.
+# The original file is never changed; every run writes a new file.
+set -eo pipefail
+
+# --- Defaults (edit these to taste) ------------------------------------------
+indir="$HOME/Desktop"   # folder the file picker lists when no file is given
+pick_max=15             # how many recent videos the picker shows
+fix_fps=30              # -f: output frame rate
+fix_crf=18              # -f: quality (lower = better and bigger)
+webm_crf=33             # -w: quality
+webm_maxw=720           # -w: widest output in pixels (never scales up)
+mp4_crf=23              # -c: quality
+audio_kbps=128          # -c: audio bitrate, kb/s
+size_audio_kbps=64      # -c with -s: audio bitrate, kb/s
+size_overhead=4         # -s: percent of the limit held back for file overhead
+min_kbps_per_mpx=300    # -s: ask first if the video gets less than this many
+                        #     kb/s per million pixels (a rough quality floor)
+
+usage() {
+  cat <<EOF
+Usage: vid-tool [-f | -w | -c] [-s MB] [-t start-end] [-r fps] [-q crf]
+                [-W width] [-o dir] [-i] [file]
+
+Run it with no options to pick a video and choose from a menu.
+
+  file          Video to work on. Left out: pick from the newest videos in
+                $indir. The original is never changed.
+
+What to do (pick one; left out: a menu asks):
+  -f            Fix slow-motion playback. Rebuilds the video at a constant
+                frame rate.                       -> name-fixed.mp4
+  -w            Make a small WebM for sharing. No audio, at most ${webm_maxw}px
+                wide.                             -> name.webm
+  -c            Compress to MP4. Keeps audio.     -> name-compressed.mp4
+
+Extras:
+  -s MB         Keep the result under this size, e.g. -s 10. Works with -c
+                and -w. With no mode given, -c is used.
+  -t start-end  Keep only part of the video, e.g. -t 0:15-1:05. Times are
+                seconds, M:SS or H:MM:SS. "0:15-" runs to the end and
+                "-1:05" starts at the beginning. Works with every mode.
+                With no mode given, -c is used.
+  -r fps        Frame rate for -f (default $fix_fps)
+  -q crf        Quality; lower is better and bigger. Defaults: -f $fix_crf,
+                -w $webm_crf, -c $mp4_crf. Not used with -s.
+  -W width      Scale down to at most this many pixels wide. Never scales
+                up. Default: $webm_maxw for -w, no scaling for -f and -c.
+  -o dir        Where to save (default: next to the original)
+  -i            Show what this machine's ffmpeg can do, then exit
+  -h            Show this help
+
+Never overwrites: adds -2, -3, ... if the output file already exists.
+EOF
+}
+
+die() { echo "$*" >&2; exit 1; }
+
+# --- Small helpers -------------------------------------------------------------
+num_re='^[0-9]+(\.[0-9]+)?$'
+int_re='^[0-9]+$'
+time_re='^([0-9]+:){0,2}[0-9]+(\.[0-9]+)?$'
+
+gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
+ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
+
+# "1:05" or "65" or "0:01:05" -> seconds
+to_secs() {
+  awk -v t="$1" 'BEGIN { n = split(t, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; printf "%.3f", s }'
+}
+
+# seconds -> "1:05" or "1:02:03"
+fmt_time() {
+  awk -v s="$1" 'BEGIN {
+    s = int(s + 0.5); h = int(s / 3600); m = int((s % 3600) / 60); x = s % 60
+    if (h > 0) printf "%d:%02d:%02d", h, m, x; else printf "%d:%02d", m, x
+  }'
+}
+
+# bytes -> "12.3 MB" (1 MB = 1,000,000 bytes)
+fmt_mb() { awk -v b="$1" 'BEGIN { printf "%.1f MB", b / 1000000 }'; }
+
+file_bytes() { wc -c < "$1" | tr -d ' '; }
+
+# --- Options -------------------------------------------------------------------
+mode="" size_mb="" trim="" fps="" crf="" maxw="" outdir="" info=0
+
+set_mode() {
+  if [[ -n $mode && $mode != "$1" ]]; then die "Pick only one of -f, -w and -c."; fi
+  mode=$1
+}
+
+while getopts "fwcs:t:r:q:W:o:ih" opt; do
+  case $opt in
+    f) set_mode f ;;
+    w) set_mode w ;;
+    c) set_mode c ;;
+    s) size_mb=$OPTARG ;;
+    t) trim=$OPTARG ;;
+    r) fps=$OPTARG ;;
+    q) crf=$OPTARG ;;
+    W) maxw=$OPTARG ;;
+    o) outdir=$OPTARG ;;
+    i) info=1 ;;
+    h) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+file=${1:-}
+if (( $# > 1 )); then
+  die "Too many arguments; quote file names that contain spaces."
+fi
+
+if [[ -n $size_mb ]] && { [[ ! $size_mb =~ $num_re ]] || ! gt "$size_mb" 0; }; then
+  die "-s needs a size in MB, e.g. -s 10 (got \"$size_mb\")."
+fi
+if [[ -n $fps ]] && { [[ ! $fps =~ $num_re ]] || ! gt "$fps" 0; }; then
+  die "-r needs a frame rate, e.g. -r 30 (got \"$fps\")."
+fi
+if [[ -n $crf ]] && { [[ ! $crf =~ $int_re ]] || (( crf > 63 )); }; then
+  die "-q needs a whole number from 0 to 63 (got \"$crf\")."
+fi
+if [[ -n $maxw ]] && { [[ ! $maxw =~ $int_re ]] || (( maxw < 16 )); }; then
+  die "-W needs a width in pixels, e.g. -W 720 (got \"$maxw\")."
+fi
+if [[ $mode == f && -n $size_mb ]]; then
+  die "-s works with -c or -w, not -f. Fix the video first, then run -c -s on the result."
+fi
+
+# --- What can this ffmpeg do? ----------------------------------------------------
+# Builds differ (a hand-built ffmpeg can lack encoders), so check what is
+# there and never assume. Features are probed; version numbers are not trusted.
+command -v ffmpeg >/dev/null \
+  || die "ffmpeg not found on PATH. Install it (brew install ffmpeg), or add the folder holding your own build to PATH."
+
+encoders=$(ffmpeg -hide_banner -encoders 2>/dev/null || true)
+[[ -n $encoders ]] || die "Couldn't read the encoder list from $(command -v ffmpeg). Does 'ffmpeg -encoders' work?"
+
+has_enc() { awk -v n="$1" '$2 == n { found = 1 } END { exit !found }' <<<"$encoders"; }
+
+h264="" aac="" vp9=""
+if has_enc libx264; then h264=libx264; elif has_enc h264_videotoolbox; then h264=h264_videotoolbox; fi
+if has_enc aac; then aac=aac; elif has_enc aac_at; then aac=aac_at; fi
+if has_enc libvpx-vp9; then vp9=libvpx-vp9; fi
+
+# Empty = available; otherwise the reason it isn't.
+why_f="" why_w="" why_c=""
+[[ -n $h264 ]] || why_f="this ffmpeg has no H.264 encoder (libx264 or h264_videotoolbox)"
+why_c=$why_f
+[[ -n $vp9 ]] || why_w="this ffmpeg has no VP9 encoder (libvpx-vp9)"
+
+report() {
+  local yes_h264="yes, using $h264" yes_vp9="yes, using $vp9"
+  echo "ffmpeg: $(command -v ffmpeg)"
+  echo "        $(ffmpeg -version 2>/dev/null | head -n 1)"
+  echo
+  echo "  -f  Fix slow motion   ${why_f:+no: }${why_f:-$yes_h264}"
+  echo "  -w  Small WebM        ${why_w:+no: }${why_w:-$yes_vp9}"
+  echo "  -c  Compress to MP4   ${why_c:+no: }${why_c:-$yes_h264}"
+  if [[ -n $aac ]]; then
+    echo "      Audio in MP4      re-encoded with $aac"
+  else
+    echo "      Audio in MP4      no AAC encoder: kept only when the original is already AAC, otherwise dropped"
+  fi
+  if [[ $h264 == libx264 ]]; then
+    echo "  -s  Size limit        two-pass for MP4${vp9:+ and WebM}"
+  elif [[ -n $h264 ]]; then
+    echo "  -s  Size limit        single pass for MP4 (less exact; checked and retried once)${vp9:+, two-pass for WebM}"
+  elif [[ -n $vp9 ]]; then
+    echo "  -s  Size limit        WebM only, two-pass"
+  else
+    echo "  -s  Size limit        no"
+  fi
+  echo "  -t  Trim              yes"
+  if [[ $h264 == h264_videotoolbox ]]; then
+    echo
+    echo "Note: h264_videotoolbox has no quality setting, so -q does nothing for"
+    echo "-f and -c here. vid-tool picks a bitrate from the original instead."
+  fi
+}
+
+if (( info )); then report; exit 0; fi
+
+# --- Pick a file -----------------------------------------------------------------
+asked=0   # 1 once anything was chosen from a prompt; prints the one-line command at the end
+
+pick_file() {
+  [[ -d $indir ]] || die "No file given, and the default folder $indir doesn't exist."
+  local names=() labels=() f p
+  while IFS= read -r f; do
+    [[ -f "$indir/$f" ]] && names+=("$f")
+  done < <(ls -t "$indir" 2>/dev/null | grep -iE '\.(mp4|mov|webm|m4v|mkv)$' | head -n "$pick_max")
+  if (( ${#names[@]} == 0 )); then
+    die "No videos found in $indir. Pass a file: vid-tool path/to/video.mp4"
+  fi
+  for f in "${names[@]}"; do
+    p="$indir/$f"
+    labels+=("$f  ($(fmt_mb "$(file_bytes "$p")"), $(stat -f '%Sm' -t '%d %b %H:%M' "$p" 2>/dev/null || true))")
+  done
+  echo "Pick a video from $indir (newest first):"
+  PS3="> "
+  select _ in "${labels[@]}"; do
+    if [[ $REPLY =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= ${#names[@]} )); then
+      file="$indir/${names[REPLY-1]}"
+      break
+    fi
+  done
+  [[ -n $file ]] || exit 1
+}
+
+if [[ -z $file ]]; then
+  [[ -t 0 ]] || die "No file given. Usage: vid-tool [options] file (see vid-tool -h)."
+  pick_file
+  asked=1
+fi
+[[ -f $file ]] || die "No such file: $file"
+
+# --- Read the video's details ------------------------------------------------------
+# Parsed from 'ffmpeg -i' so there is no dependency on ffprobe, which
+# hand-built installs often lack.
+probe=$(ffmpeg -nostdin -hide_banner -i "$file" 2>&1 || true)
+vline=$(grep -m1 -E 'Stream #.*: Video:' <<<"$probe" || true)
+if [[ -z $vline ]]; then
+  echo "ffmpeg can't find any video in: $file" >&2
+  echo "ffmpeg said: $(tail -n 1 <<<"$probe")" >&2
+  exit 1
+fi
+
+in_w="" in_h=""
+read -r in_w in_h <<<"$(awk 'match($0, /, [0-9]+x[0-9]+/) {
+  split(substr($0, RSTART + 2, RLENGTH - 2), d, "x"); print d[1], d[2]; exit }' <<<"$vline")"
+
+acodec=""   # empty = no audio
+aline=$(grep -m1 -E 'Stream #.*: Audio:' <<<"$probe" || true)
+[[ -n $aline ]] && acodec=$(sed -E 's/.*Audio: ([A-Za-z0-9_]+).*/\1/' <<<"$aline")
+
+duration=""   # seconds; empty = unknown
+d=$(awk '/Duration:/ { sub(/,/, "", $2); print $2; exit }' <<<"$probe")
+if [[ $d =~ $time_re ]]; then
+  duration=$(to_secs "$d")
+else
+  # Some files (browser-recorded WebM) don't store a length. Read through
+  # the file once to find it; no re-encoding, so this is quick.
+  scan=$(ffmpeg -nostdin -hide_banner -i "$file" -map 0:v:0 -c copy -f null - 2>&1 || true)
+  d=$(tr '\r' '\n' <<<"$scan" | grep -oE 'time=[0-9:.]+' | tail -n 1 | cut -d= -f2 || true)
+  [[ $d =~ $time_re ]] && duration=$(to_secs "$d")
+fi
+if [[ -n $duration ]] && ! gt "$duration" 0; then duration=""; fi
+
+in_bytes=$(file_bytes "$file")
+base=$(basename "$file")
+name=${base%.*}
+ext=$(tr '[:upper:]' '[:lower:]' <<<"${base##*.}")
+
+src_kbps=0   # overall bitrate of the original; 0 = unknown
+[[ -n $duration ]] && src_kbps=$(awk -v b="$in_bytes" -v d="$duration" 'BEGIN { printf "%d", b * 8 / d / 1000 }')
+
+# --- Trim checks --------------------------------------------------------------------
+# Sets trim_start, trim_end ("" = run to the end) and seg_dur (length of the
+# part being kept, "" = unknown). On a bad range, sets trim_err and returns 1.
+trim_start=0 trim_end="" seg_dur=$duration trim_err="" trim_note=""
+
+check_trim() {
+  local spec=$1 a b
+  local example="Use start-end, e.g. 0:15-1:05 (seconds, M:SS or H:MM:SS)."
+  trim_err="" trim_note=""
+  if [[ $spec != *-* || $spec == "-" ]]; then
+    trim_err="Can't read the trim range \"$spec\". $example"
+    return 1
+  fi
+  a=${spec%%-*}
+  b=${spec#*-}
+  if [[ -n $a && ! $a =~ $time_re ]] || [[ -n $b && ! $b =~ $time_re ]]; then
+    trim_err="Can't read the trim range \"$spec\". $example"
+    return 1
+  fi
+  if [[ -n $a ]]; then a=$(to_secs "$a"); else a=0; fi
+  [[ -n $b ]] && b=$(to_secs "$b")
+
+  if [[ -n $duration ]]; then
+    if ge "$a" "$duration"; then
+      trim_err="The trim starts at $(fmt_time "$a") but the video is only $(fmt_time "$duration") long."
+      return 1
+    fi
+    if [[ -n $b ]] && ge "$b" "$duration"; then
+      gt "$b" "$duration" && trim_note="Note: the video is only $(fmt_time "$duration") long, so the trim stops there."
+      b=""
+    fi
+  else
+    trim_note="Note: couldn't read the video's length, so the trim range isn't checked against it."
+  fi
+  if [[ -n $b ]] && ge "$a" "$b"; then
+    trim_err="The trim end ($(fmt_time "$b")) must be after its start ($(fmt_time "$a"))."
+    return 1
+  fi
+
+  local len=""
+  if [[ -n $b ]]; then
+    len=$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.3f", b - a }')
+  elif [[ -n $duration ]]; then
+    len=$(awk -v a="$a" -v d="$duration" 'BEGIN { printf "%.3f", d - a }')
+  fi
+  if [[ -n $len ]] && ! gt "$len" 0.2; then
+    trim_err="That trim keeps less than a fifth of a second. Pick a longer range."
+    return 1
+  fi
+  trim_start=$a trim_end=$b seg_dur=$len
+  return 0
+}
+
+ask_trim() {   # $1 = prompt
+  local t
+  while :; do
+    read -r -p "$1" t || exit 1
+    [[ -z $t ]] && return 1
+    if check_trim "$t"; then
+      trim=$t
+      [[ -n $trim_note ]] && echo "$trim_note"
+      return 0
+    fi
+    echo "$trim_err"
+  done
+}
+
+# --- Choose what to do ---------------------------------------------------------------
+menu_line() {   # number, text, why-not
+  if [[ -n $3 ]]; then
+    printf '  %s) %s  (not available: %s)\n' "$1" "$2" "$3"
+  else
+    printf '  %s) %s\n' "$1" "$2"
+  fi
+}
+
+if [[ -z $mode ]]; then
+  if [[ -n $size_mb || -n $trim ]]; then
+    mode=c
+  else
+    [[ -t 0 ]] || die "Say what to do: -f, -w or -c (see vid-tool -h)."
+    asked=1
+    echo
+    echo "$base: $(fmt_mb "$in_bytes")${duration:+, $(fmt_time "$duration") long}${in_w:+, ${in_w}x${in_h}}"
+    echo "What do you want to do?"
+    menu_line 1 "It plays in slow motion: fix it" "$why_f"
+    menu_line 2 "Make a small WebM to share (no audio)" "$why_w"
+    menu_line 3 "Compress to MP4 (keeps audio)" "$why_c"
+    menu_line 4 "Get it under a size limit, as MP4" "$why_c"
+    want_size=0
+    while :; do
+      read -r -p "> " choice || exit 1
+      case $choice in
+        1) pick=f why=$why_f ;;
+        2) pick=w why=$why_w ;;
+        3) pick=c why=$why_c ;;
+        4) pick=c why=$why_c want_size=1 ;;
+        *) echo "Enter 1, 2, 3 or 4."; continue ;;
+      esac
+      if [[ -n $why ]]; then echo "Not available: $why."; want_size=0; continue; fi
+      mode=$pick
+      break
+    done
+    if (( want_size )); then
+      while :; do
+        read -r -p "Size limit in MB (e.g. 10): " size_mb || exit 1
+        if [[ $size_mb =~ $num_re ]] && gt "$size_mb" 0; then break; fi
+        echo "Enter a number, e.g. 10."
+      done
+    fi
+    ask_trim "Trim it? Enter start-end, e.g. 0:15-1:05, or press Enter to keep it all: " || true
+  fi
+fi
+
+case $mode in
+  f) why=$why_f ;;
+  w) why=$why_w ;;
+  c) why=$why_c ;;
+esac
+[[ -z $why ]] || die "Can't do that here: $why. Run 'vid-tool -i' to see what this ffmpeg supports."
+
+if [[ -n $trim ]]; then
+  check_trim "$trim" || die "$trim_err"
+  (( asked )) || { [[ -z $trim_note ]] || echo "$trim_note"; }
+fi
+
+# --- Work out the settings -----------------------------------------------------------
+if [[ $mode == w ]]; then enc=$vp9; else enc=$h264; fi
+
+case $mode in
+  f) crf=${crf:-$fix_crf}; fps=${fps:-$fix_fps} ;;
+  w) crf=${crf:-$webm_crf} ;;
+  c) crf=${crf:-$mp4_crf} ;;
+esac
+eff_maxw=$maxw
+[[ $mode == w && -z $eff_maxw ]] && eff_maxw=$webm_maxw
+
+# Audio: WebM output has none. MP4 output re-encodes to AAC where it can.
+a_args=(-an) a_kbps=0 a_note=""
+if [[ $mode != w && -n $acodec ]]; then
+  ab=$audio_kbps
+  [[ -n $size_mb ]] && ab=$size_audio_kbps
+  if [[ $mode == f && $acodec == aac ]]; then
+    a_args=(-c:a copy) a_kbps=$audio_kbps
+  elif [[ -n $aac ]]; then
+    a_args=(-c:a "$aac" -b:a "${ab}k") a_kbps=$ab
+  elif [[ $acodec == aac ]]; then
+    a_args=(-c:a copy) a_kbps=$audio_kbps
+  else
+    a_note="Note: dropping the audio. This ffmpeg has no AAC encoder and the original audio is $acodec."
+  fi
+fi
+
+# h264_videotoolbox takes a bitrate, not a quality level. Base it on the
+# original: about the same for a fix, about half for a compress.
+vt_kbps=4000
+if (( src_kbps > 0 )); then
+  if [[ $mode == f ]]; then vt_kbps=$src_kbps; else vt_kbps=$(( src_kbps / 2 )); fi
+  (( vt_kbps < 500 )) && vt_kbps=500
+fi
+
+# --- Size limit: turn MB into a bitrate, and check it's worth doing -------------------
+v_kbps=""   # set = aim for this video bitrate; empty = use the quality setting
+floor=0 out_w="" out_h=""
+
+plan_size() {
+  out_w=$in_w out_h=$in_h
+  if [[ -n $in_w && -n $eff_maxw ]] && (( eff_maxw < in_w )); then
+    out_w=$eff_maxw
+    out_h=$(( in_h * eff_maxw / in_w ))
+  fi
+  # Never aim higher than the original's own bitrate; that only adds bytes.
+  v_kbps=$(awk -v b="$target_bytes" -v d="$seg_dur" -v o="$size_overhead" -v a="$a_kbps" -v src="$src_kbps" \
+    'BEGIN { t = b * 8 * (100 - o) / 100 / d / 1000; if (src > 0 && t > src) t = src; printf "%d", t - a }')
+  floor=0
+  [[ -n $out_w ]] && floor=$(( out_w * out_h * min_kbps_per_mpx / 1000000 ))
+  return 0
+}
+
+# Too little bitrate to look OK? Only when it is under the rough floor AND
+# under half the original's bitrate, because screen recordings often look
+# fine far below the floor.
+looks_poor() {
+  (( v_kbps < 30 )) && return 0
+  (( floor > 0 && v_kbps < floor )) || return 1
+  (( src_kbps > 0 && v_kbps * 2 >= src_kbps )) && return 1
+  return 0
+}
+
+if [[ -n $size_mb ]]; then
+  target_bytes=$(awk -v m="$size_mb" 'BEGIN { printf "%d", m * 1000000 }')
+  if (( in_bytes <= target_bytes )) && [[ -z $trim && -z $maxw ]] \
+     && { [[ $mode == c && $ext == mp4 ]] || [[ $mode == w && $ext == webm ]]; }; then
+    echo "$base is already $(fmt_mb "$in_bytes"), under the $size_mb MB limit. Nothing to do."
+    exit 0
+  fi
+  [[ -n $seg_dur ]] || die "Couldn't read the video's length, so a size limit can't be worked out. Try -c or -w without -s."
+
+  while :; do
+    plan_size
+    looks_poor || break
+
+    fit=$(awk -v b="$target_bytes" -v o="$size_overhead" -v f="$floor" -v a="$a_kbps" \
+      'BEGIN { if (f + a > 0) printf "%d", b * 8 * (100 - o) / 100 / ((f + a) * 1000); else print 0 }')
+    cand=""
+    if [[ -n $in_w ]]; then
+      for w in 720 540 480 360; do
+        (( w < out_w )) || continue
+        (( v_kbps >= w * (in_h * w / in_w) * min_kbps_per_mpx / 1000000 )) && { cand=$w; break; }
+      done
+    fi
+
+    echo
+    if (( v_kbps < 30 )); then
+      echo "$(fmt_time "$seg_dur") of video won't fit in $size_mb MB: there is almost no bitrate left for the picture."
+    else
+      echo "To fit $size_mb MB, $(fmt_time "$seg_dur") of video gets about $v_kbps kb/s."
+      echo "At ${out_w}x${out_h} that is likely to look blocky (about $floor kb/s is the least that looks OK)."
+    fi
+    (( fit > 0 )) && echo "At this picture size, about $(fmt_time "$fit") of video fits."
+
+    if [[ ! -t 0 ]]; then
+      echo "Trim it with -t start-end${cand:+, or scale it down with -W $cand}." >&2
+      exit 1
+    fi
+    asked=1
+    echo
+    [[ -n $cand ]] && echo "  1) Scale down to ${cand}px wide (whole frame kept; small text gets softer)"
+    echo "  2) Trim to a shorter part"
+    echo "  3) Encode anyway"
+    echo "  4) Cancel"
+    read -r -p "> " choice || exit 1
+    case $choice in
+      1) if [[ -n $cand ]]; then maxw=$cand eff_maxw=$cand; else echo "Enter 2, 3 or 4."; fi ;;
+      2) ask_trim "Keep which part? start-end, e.g. 0:15-1:05 (Enter to go back): " || true ;;
+      3) break ;;
+      4) echo "Cancelled; nothing was saved."; exit 1 ;;
+      *) echo "Enter a number from the list." ;;
+    esac
+  done
+  (( v_kbps >= 10 )) || v_kbps=10
+fi
+
+# --- Build the ffmpeg command ---------------------------------------------------------
+in_args=()
+gt "$trim_start" 0 && in_args+=(-ss "$trim_start")
+# No end given means "to the end", which needs no length.
+if [[ -n $trim_end ]]; then in_args+=(-t "$seg_dur"); fi
+
+# H.264 and VP9 want even dimensions, so round down to even either way.
+vf_parts=()
+[[ $mode == f ]] && vf_parts+=("fps=$fps")
+if [[ -n $eff_maxw ]]; then
+  vf_parts+=("scale='trunc(min($eff_maxw,iw)/2)*2':-2")
+else
+  vf_parts+=("scale='trunc(iw/2)*2':'trunc(ih/2)*2'")
+fi
+vf=$(IFS=,; echo "${vf_parts[*]}")
+
+case $mode in
+  f) stem="$name-fixed" oext=mp4 ;;
+  w) if [[ $ext == webm ]]; then stem="$name-small"; else stem=$name; fi; oext=webm ;;
+  c) stem="$name-compressed" oext=mp4 ;;
+esac
+mux=()
+[[ $oext == mp4 ]] && mux=(-movflags +faststart)
+
+user_out=$outdir
+if [[ -z $outdir ]]; then outdir=$(cd "$(dirname "$file")" && pwd); fi
+mkdir -p "$outdir"
+out="$outdir/$stem.$oext"
+n=2
+while [[ -e $out ]]; do
+  out="$outdir/$stem-$n.$oext"
+  n=$((n + 1))
+done
+
+tmp=$(mktemp -d)
+partial=""
+cleanup() {
+  [[ -n $tmp ]] && rm -rf "$tmp"
+  [[ -n $partial ]] && rm -f "$partial"
+  return 0
+}
+trap cleanup EXIT
+trap 'echo; echo "Stopped; nothing was saved." >&2; exit 130' INT
+
+run_ffmpeg() {
+  ffmpeg -nostdin -hide_banner -loglevel error -stats -y "${in_args[@]}" -i "$file" "$@"
+}
+
+encode() {   # $1 = video bitrate in kb/s, or empty to use the quality setting
+  local kbps=$1 v=(-c:v "$enc") common=()
+  if [[ -n $kbps ]]; then
+    v+=(-b:v "${kbps}k")
+    # videotoolbox overshoots a plain bitrate; a cap pulls it closer.
+    if [[ $enc == h264_videotoolbox ]]; then v+=(-maxrate "${kbps}k" -bufsize "$(( kbps * 2 ))k"); fi
+  elif [[ $enc == h264_videotoolbox ]]; then
+    v+=(-b:v "${vt_kbps}k")
+  elif [[ $enc == libvpx-vp9 ]]; then
+    v+=(-crf "$crf" -b:v 0)
+  else
+    v+=(-crf "$crf")
+  fi
+  if [[ $enc == libx264 ]]; then v+=(-preset slow); fi
+  common=(-vf "$vf" "${v[@]}" -pix_fmt yuv420p -sn -dn)
+  partial=$out
+  if [[ -n $kbps && $enc != h264_videotoolbox ]]; then
+    echo "Pass 1 of 2..."
+    run_ffmpeg "${common[@]}" -an -pass 1 -passlogfile "$tmp/pass" -f null /dev/null || return 1
+    echo "Pass 2 of 2..."
+    run_ffmpeg "${common[@]}" "${a_args[@]}" "${mux[@]}" -pass 2 -passlogfile "$tmp/pass" "$out" || return 1
+  else
+    run_ffmpeg "${common[@]}" "${a_args[@]}" "${mux[@]}" "$out" || return 1
+  fi
+  [[ -s $out ]] || return 1
+}
+
+# --- Say what's about to happen, then do it -----------------------------------------
+case $mode in
+  f) what="Fixing frame rate to ${fps} fps" ;;
+  w) what="Making a WebM" ;;
+  c) what="Compressing to MP4" ;;
+esac
+detail="$enc"
+if [[ -n $v_kbps ]]; then
+  detail="$detail, under $size_mb MB (video $v_kbps kb/s)"
+elif [[ $enc == h264_videotoolbox ]]; then
+  detail="$detail, $vt_kbps kb/s"
+else
+  detail="$detail, quality $crf"
+fi
+[[ -n $eff_maxw ]] && detail="$detail, at most ${eff_maxw}px wide"
+if [[ -n $trim ]]; then
+  detail="$detail, from $(fmt_time "$trim_start") to $(fmt_time "${trim_end:-${duration:-0}}")"
+fi
+echo
+echo "$what: $base -> $(basename "$out")"
+echo "  $detail"
+[[ -n $a_note ]] && echo "$a_note"
+if [[ $enc == h264_videotoolbox && -z $v_kbps ]]; then
+  echo "Note: no libx264 in this ffmpeg, so using h264_videotoolbox with a bitrate picked from the original."
+fi
+
+fail="ffmpeg failed; nothing was saved. The message above is from ffmpeg."
+encode "$v_kbps" || die "$fail"
+
+if [[ -n $size_mb ]]; then
+  out_bytes=$(file_bytes "$out")
+  if (( out_bytes > target_bytes )); then
+    echo "That came out at $(fmt_mb "$out_bytes"), over the limit. Trying once more at a lower bitrate..."
+    v_kbps=$(awk -v v="$v_kbps" -v t="$target_bytes" -v o="$out_bytes" 'BEGIN { n = int(v * t / o * 0.93); if (n < 10) n = 10; print n }')
+    rm -f "$out"
+    encode "$v_kbps" || die "$fail"
+    out_bytes=$(file_bytes "$out")
+    if (( out_bytes > target_bytes )); then
+      echo "Couldn't get under $size_mb MB (best was $(fmt_mb "$out_bytes")); nothing was saved." >&2
+      if [[ $enc == h264_videotoolbox ]]; then
+        echo "h264_videotoolbox won't go below a certain bitrate for a given picture size." >&2
+      fi
+      die "Scale it down with -W (e.g. -W ${out_w:+$(( out_w / 2 ))}) or trim it with -t."
+    fi
+  fi
+fi
+partial=""
+
+out_bytes=$(file_bytes "$out")
+echo "Saved: $out ($(fmt_mb "$out_bytes"), was $(fmt_mb "$in_bytes"))"
+if [[ $mode != f && -z $trim ]] && (( out_bytes > in_bytes )); then
+  echo "Note: that is bigger than the original. Try a higher -q, or -s to set a size."
+fi
+
+if (( asked )); then
+  hint="vid-tool -$mode"
+  [[ -n $size_mb ]] && hint+=" -s $size_mb"
+  [[ -n $trim ]] && hint+=" -t $trim"
+  [[ -n $maxw ]] && hint+=" -W $maxw"
+  [[ -n $user_out ]] && hint+=" -o $(printf '%q' "$user_out")"
+  echo "Same thing in one line: $hint $(printf '%q' "$file")"
+fi
+exit 0
