@@ -1,0 +1,159 @@
+#!/bin/bash
+# Tests for vid-tool. Needs ffmpeg; the prompt tests also need expect.
+#
+#   vid-tool/tests/run
+#
+# Makes its own test clips with ffmpeg in a temp folder and deletes the
+# folder on exit. Exits non-zero if any check fails. Runs vid-tool under
+# /bin/bash, which on macOS is bash 3.2.
+#
+# Provisional: written alongside the tool, before the repo had a testing
+# convention. Expect it to be reworked.
+
+here=$(cd "$(dirname "$0")" && pwd)
+tool="$here/../vid-tool"
+real=$(command -v ffmpeg) || { echo "ffmpeg not found on PATH." >&2; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+stub="$work/stub"
+mkdir -p "$stub" "$work/empty"
+cd "$work" || exit 1
+
+# A fake ffmpeg that hides encoders matching $HIDE from 'ffmpeg -encoders',
+# and passes everything else to the real one. Simulates a build without them.
+cat > "$stub/ffmpeg" <<EOF
+#!/bin/bash
+real="$real"
+for a in "\$@"; do
+  if [[ \$a == -encoders ]]; then "\$real" "\$@" 2>/dev/null | grep -vE "\$HIDE"; exit 0; fi
+done
+exec "\$real" "\$@"
+EOF
+chmod +x "$stub/ffmpeg"
+
+# --- Test clips -----------------------------------------------------------------
+q() { ffmpeg -nostdin -hide_banner -loglevel error -y "$@"; }
+q -f lavfi -i testsrc2=size=540x1200:rate=30 -f lavfi -i sine=frequency=440 -t 12 \
+  -c:v libx264 -crf 12 -pix_fmt yuv420p -c:a aac clip.mp4
+q -i clip.mp4 -c:v copy -c:a pcm_s16le clip.mov
+q -f lavfi -i testsrc2=size=541x301:rate=30 -t 3 -c:v libx264 -pix_fmt yuv444p odd.mp4
+# Written to a pipe, so it has no stored length (like a browser recording).
+q -f lavfi -i testsrc2=size=320x240:rate=30 -t 4 -c:v libvpx-vp9 -b:v 200k -f webm - > nodur.webm
+# Variable frame rate: 60 fps for two seconds, then 20 fps.
+q -f lavfi -i testsrc2=size=320x240:rate=60 -vf "select='lt(n,120)+not(mod(n,3))'" \
+  -fps_mode vfr -t 6 -c:v libx264 -pix_fmt yuv420p vfr.mp4
+cp clip.mp4 "with space.mp4"
+echo "not a video" > notes.txt
+
+# --- Helpers ----------------------------------------------------------------------
+pass=0; fail=0
+run() {   # label, expected exit code, command...
+  local label=$1 want=$2 out code r; shift 2
+  out=$("$@" </dev/null 2>&1); code=$?
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  tr '\r' '\n' <<<"$out" | grep -vE '^(frame=|\[libx264|\[libvpx|$)' | sed 's/^/    /'
+}
+facts() {   # file -> size, length, picture size, frame rate, audio
+  local p; p=$(ffmpeg -hide_banner -i "$1" 2>&1)
+  echo "    -> $1: $(wc -c < "$1" | tr -d ' ') bytes," \
+    "$(grep -oE 'Duration: [0-9:.]+' <<<"$p")," \
+    "$(grep -m1 'Video:' <<<"$p" | grep -oE ', [0-9]+x[0-9]+' | head -1)," \
+    "fps=$(grep -m1 'Video:' <<<"$p" | grep -oE '[0-9.]+ fps')," \
+    "audio=$(grep -m1 'Audio:' <<<"$p" | sed -E 's/.*Audio: ([a-z0-9_]+).*/\1/')"
+}
+check() {
+  if eval "$1"; then pass=$((pass+1)); echo "    PASS $1"; else fail=$((fail+1)); echo "    FAIL $1"; fi
+}
+size() { wc -c < "$1" | tr -d ' '; }
+vfr() { ffmpeg -nostdin -hide_banner -i "$1" -vf vfrdet -an -f null - 2>&1 | grep -oE 'VFR:[0-9.]+'; }
+T() { /bin/bash "$tool" "$@"; }
+
+# --- Modes ------------------------------------------------------------------------
+run "help" 0 T -h
+run "info" 0 T -i
+run "fix" 0 T -f clip.mp4;                      facts clip-fixed.mp4
+run "fix again, no overwrite" 0 T -f clip.mp4;  check '[[ -f clip-fixed-2.mp4 ]]'
+run "fix a variable frame rate clip" 0 T -f vfr.mp4
+check '[[ $(vfr vfr.mp4) != VFR:0.000000 ]]'
+check '[[ $(vfr vfr-fixed.mp4) == VFR:0.000000 ]]'
+run "webm" 0 T -w clip.mp4;                     facts clip.webm
+run "compress mov (pcm audio)" 0 T -c clip.mov; facts clip-compressed.mp4
+
+# --- Size limit ---------------------------------------------------------------------
+run "size 0.5" 0 T -s 0.5 clip.mp4;             facts clip-compressed-2.mp4
+check '(( $(size clip-compressed-2.mp4) <= 500000 ))'
+run "webm size 0.4" 0 T -w -s 0.4 clip.mp4;     facts clip-2.webm
+check '(( $(size clip-2.webm) <= 400000 ))'
+run "already under limit" 0 T -s 100 clip.mp4
+run "impossible size, no terminal" 1 T -s 0.01 clip.mp4
+run "low quality size, no terminal" 1 T -s 0.1 clip.mp4
+run "no-length webm with size" 0 T -w -s 0.05 nodur.webm; facts nodur-small.webm
+
+# --- Trim -----------------------------------------------------------------------------
+run "trim 2-5" 0 T -t 2-5 clip.mp4;             facts clip-compressed-3.mp4
+run "trim 9- (to end)" 0 T -c -t 9- clip.mp4;   facts clip-compressed-4.mp4
+run "trim -3 (from start)" 0 T -c -t -3 clip.mp4; facts clip-compressed-5.mp4
+run "trim end past the video: clamped" 0 T -c -t 5-50 clip.mp4; facts clip-compressed-6.mp4
+run "trim M:SS with fix" 0 T -f -t 0:01-0:02.5 clip.mp4; facts clip-fixed-3.mp4
+run "trim starts past the end" 1 T -c -t 20-30 clip.mp4
+run "trim reversed" 1 T -c -t 5-2 clip.mp4
+run "trim not a time" 1 T -c -t abc clip.mp4
+run "trim three parts" 1 T -c -t 1-2-3 clip.mp4
+run "trim too short" 1 T -c -t 1-1.1 clip.mp4
+
+# --- Bad input ------------------------------------------------------------------------
+run "missing file" 1 T -c nope.mp4
+run "not a video" 1 T -c notes.txt
+run "bad -s" 1 T -s abc clip.mp4
+run "bad -q" 1 T -c -q 99 clip.mp4
+run "-f with -s" 1 T -f -s 1 clip.mp4
+run "two modes" 1 T -f -w clip.mp4
+run "no mode, no terminal" 1 T clip.mp4
+run "no file, no terminal" 1 T -c
+run "too many args" 1 T -c with space.mp4
+
+# --- Awkward files ----------------------------------------------------------------------
+run "odd dimensions" 0 T -c odd.mp4;            facts odd-compressed.mp4
+run "webm width flag" 0 T -w -W 200 odd.mp4;    facts odd.webm
+run "spaces in names, with -o" 0 T -c -o "out dir" "with space.mp4"
+facts "out dir/with space-compressed.mp4"
+check '! ls | grep -q pass'   # no two-pass log files left behind
+
+# --- Missing encoders (fake ffmpeg) -----------------------------------------------------
+realpath_env=$PATH
+export PATH="$stub:$PATH"
+if "$real" -hide_banner -encoders 2>/dev/null | grep -q h264_videotoolbox; then
+  HIDE='libx264' run "no libx264: info" 0 T -i
+  HIDE='libx264' run "no libx264: compress" 0 T -c -o vt clip.mp4; facts vt/clip-compressed.mp4
+  HIDE='libx264' run "no libx264: fix" 0 T -f -o vt clip.mp4;      facts vt/clip-fixed.mp4
+  HIDE='libx264' run "no libx264: size below the encoder's floor" 1 T -s 0.5 -o vt clip.mp4
+  check '[[ ! -e vt/clip-compressed-2.mp4 ]]'
+  HIDE='libx264' run "no libx264: size, scaled down" 0 T -s 0.5 -W 270 -o vt clip.mp4
+  check '(( $(size vt/clip-compressed-2.mp4) <= 500000 ))'
+else
+  echo "=== SKIP h264_videotoolbox fallback: this ffmpeg doesn't have it"
+fi
+HIDE='libx264|videotoolbox|libvpx' run "no video encoders: info" 0 T -i
+HIDE='libx264|videotoolbox|libvpx' run "no video encoders: compress" 1 T -c clip.mp4
+HIDE='libx264|videotoolbox|libvpx' run "no video encoders: webm" 1 T -w clip.mp4
+HIDE=' aac' run "no aac: pcm audio dropped" 0 T -c -o na clip.mov;  facts na/clip-compressed.mp4
+HIDE=' aac' run "no aac: aac audio copied" 0 T -c -o na clip.mp4;   facts na/clip-compressed-2.mp4
+run "no ffmpeg" 1 env PATH="$work/empty" /bin/bash "$tool" -c clip.mp4
+export PATH=$realpath_env
+
+# --- Menus and prompts (through a real terminal) ------------------------------------------
+if command -v expect >/dev/null; then
+  if expect -f "$here/prompts.exp" "$tool" "$work" "$stub"; then
+    pass=$((pass+1)); echo "=== PASS [prompts]"
+  else
+    fail=$((fail+1)); echo "=== FAIL [prompts]"
+  fi
+else
+  echo "=== SKIP prompts: expect not installed"
+fi
+
+echo
+echo "TOTAL pass=$pass fail=$fail"
+(( fail == 0 ))
