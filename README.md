@@ -92,3 +92,7 @@ Tools/
 3. Add a `README.md` in its folder: a one-line summary, usage (including argument order), defaults, examples, how it works, and troubleshooting. Keep it self-contained; don't describe one tool's behaviour in terms of another's.
 4. Add a row to the **Tools** table and a few lines to the **Quick reference** above, including one example that uses every option.
 5. Run `./install.sh` to put it on your PATH.
+
+## Licence
+
+[Apache 2.0](LICENSE). Use, change and share these tools however you like, including in paid or closed software. Keep the licence and copyright notice with any copy.
