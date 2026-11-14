@@ -39,7 +39,7 @@ adb-shot -p -C hero-crop         # open in Preview, leave the clipboard alone
 
 ## Step-by-step series (`-n`)
 
-`-n` is for repro steps. The script prompts `Shot 1/4: press Enter to capture...`, so you can move through the app on the phone and press Enter at each step. Files are numbered `name-1.png`, `name-2.png`, and so on. The last shot is copied to the clipboard.
+`-n` is for repro steps. The script prompts `Shot 1/4: press Enter to capture...`, so you can move through the app on the phone and press Enter at each step. Files are numbered `name-1.png`, `name-2.png`, and so on. Each shot is copied to the clipboard as soon as it is saved, so you can paste it into a ticket before pressing Enter for the next one. The clipboard holds one image at a time, so each shot replaces the one before it. `-C` turns copying off for the whole series.
 
 ## Foldables and multi-screen devices
 
