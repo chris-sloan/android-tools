@@ -203,6 +203,16 @@ Command-line options override these for a single run.
 | The result is bigger than the original | The original was already well compressed. Raise `-q` (try 28), or set a size with `-s`. |
 | Still plays in slow motion after `-f` | Try the frame rate the video was recorded at, for example `-r 60`. |
 
+## Tests
+
+```bash
+vid-tool/tests/run
+```
+
+Needs `ffmpeg`, and `expect` for the menu and prompt tests (macOS ships it). It makes its own test clips in a temp folder, runs every mode and failure case, and deletes the folder when done. Missing encoders are simulated with a fake `ffmpeg` that hides them from the encoder list. It takes about two minutes and exits non-zero if anything fails.
+
+These tests are provisional. They were written alongside the tool, before the repo had a testing convention, and will be reworked once one is agreed.
+
 ## History
 
 vid-tool started in January 2026 as `videoTool.sh` in a separate `video-tools` repository. It was a menu of three ffmpeg commands: fix slow motion, shrink to WebM, and (from July 2026) compress MOV to MP4.
