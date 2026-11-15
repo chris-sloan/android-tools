@@ -32,7 +32,7 @@ the top of its `tests/run`, so the gap is written down and not forgotten.
 ## Layout
 
 ```
-Tools/
+.
 ├── tests/                 repo-wide checks, shared helpers, shared fakes
 │   └── run
 └── <tool>/

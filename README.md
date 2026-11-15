@@ -77,7 +77,7 @@ Turn on **Developer options** (tap **Settings → About phone → Build number**
 ## Layout
 
 ```
-Tools/
+.
 ├── README.md          this file
 ├── install.sh         links every tool into ~/.local/bin
 └── <tool>/
