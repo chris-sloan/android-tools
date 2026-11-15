@@ -91,7 +91,8 @@ Tools/
 2. Start the script with a defaults block and a `-h` help message, like the existing tools.
 3. Add a `README.md` in its folder: a one-line summary, usage (including argument order), defaults, examples, how it works, and troubleshooting. Keep it self-contained; don't describe one tool's behaviour in terms of another's.
 4. Add a row to the **Tools** table and a few lines to the **Quick reference** above, including one example that uses every option.
-5. Run `./install.sh` to put it on your PATH.
+5. Add tests in `my-tool/tests/run`. See [docs/testing.md](docs/testing.md).
+6. Run `./install.sh` to put it on your PATH.
 
 ## Licence
 
