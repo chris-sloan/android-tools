@@ -1,0 +1,33 @@
+#!/bin/bash
+# Research for issue #4: does a tests folder confuse install.sh?
+# Copies the repo's tracked files to a temp folder, adds test folders in the
+# places the proposal would put them, and runs install.sh with HOME pointed at
+# a temp folder so nothing real is linked.
+#
+#   research/testing/try-install [bash-binary]     (default /bin/bash)
+sh=${1:-/bin/bash}
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/repo" "$work/home"
+cp -R "$root/adb-shot" "$root/adb-record" "$root/vid-tool" "$root/install.sh" "$work/repo/"
+export HOME="$work/home"
+links() { ls "$HOME/.local/bin" 2>/dev/null | tr '\n' ' '; }
+
+echo "##### 1. repo as it is (vid-tool/tests/run exists and is executable)"
+"$sh" "$work/repo/install.sh"; echo "exit=$?; links: $(links)"
+
+echo; echo "##### 2. plus <tool>/tests/run in every tool, and a top-level tests/run and tests/lib.sh"
+mkdir -p "$work/repo/adb-shot/tests" "$work/repo/adb-record/tests" "$work/repo/tests"
+for f in adb-shot/tests/run adb-record/tests/run tests/run tests/lib.sh; do
+  printf '#!/bin/bash\n' > "$work/repo/$f"; chmod +x "$work/repo/$f"
+done
+rm -rf "$HOME/.local"
+"$sh" "$work/repo/install.sh"; echo "exit=$?; links: $(links)"
+
+echo; echo "##### 3. the one way to break it: a top-level folder holding an executable of the same name (tests/tests)"
+printf '#!/bin/bash\n' > "$work/repo/tests/tests"; chmod +x "$work/repo/tests/tests"
+rm -rf "$HOME/.local"
+"$sh" "$work/repo/install.sh"; echo "exit=$?; links: $(links)"
+exit 0

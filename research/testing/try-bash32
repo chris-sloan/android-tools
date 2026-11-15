@@ -1,0 +1,22 @@
+#!/bin/bash
+# Research for issue #4: which newer-bash features does 'bash -n' catch on a
+# given bash, and which only fail when the line actually runs?
+#
+#   research/testing/try-bash32 [bash-binary]     (default /bin/bash)
+#
+# Each snippet uses one feature added after bash 3.2. For each it prints the
+# exit code of 'bash -n' (parse only) and of really running it.
+sh=${1:-/bin/bash}
+here=$(cd "$(dirname "$0")" && pwd)
+echo "bash under test: $("$sh" -c 'echo $BASH_VERSION')"
+# "run" is the exit code; "stderr" says whether running it printed an error.
+# Without 'set -e' a script carries on after most of these errors, so the
+# exit code alone can be 0 even though the feature did not work.
+printf '%-8s %-5s %-7s %s\n' "bash -n" "run" "stderr" "snippet (feature, bash version that added it)"
+for f in "$here"/bash4-snippets/*.sh; do
+  "$sh" -n "$f" >/dev/null 2>&1; n=$?
+  err=$("$sh" "$f" 2>&1 >/dev/null </dev/null); r=$?
+  if [[ -n $err ]]; then e=yes; else e=no; fi
+  printf '%-8s %-5s %-7s %s\n' "$n" "$r" "$e" "$(basename "$f"): $(sed -n '2s/^# //p' "$f")"
+  if [[ -n $err ]]; then echo "                         $(head -n 1 <<<"$err" | sed 's|.*/bash4-snippets/||')"; fi
+done

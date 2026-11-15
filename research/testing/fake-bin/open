@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake open for the testing research (issue #4): logs the call, does nothing.
+echo "open $*" >> "${FAKE_ADB_LOG:-/dev/null}"
+exit 0

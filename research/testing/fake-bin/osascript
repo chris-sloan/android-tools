@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake osascript for the testing research (issue #4): logs the call, does nothing.
+echo "osascript $*" >> "${FAKE_ADB_LOG:-/dev/null}"
+exit "${FAKE_OSASCRIPT_EXIT:-0}"

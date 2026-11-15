@@ -1,0 +1,100 @@
+#!/bin/bash
+# Research for issue #4: how far can adb-shot and adb-record be tested with a
+# fake adb on PATH and no device? Not a test suite; it prints what happened.
+#
+#   research/testing/try-fakes [bash-binary]     (default /bin/bash)
+sh=${1:-/bin/bash}
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../.." && pwd)
+shot="$root/adb-shot/adb-shot"
+rec="$root/adb-record/adb-record"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/empty" "$work/home"
+cd "$work" || exit 1
+export HOME="$work/home"
+export FAKE_ADB_LOG="$work/adb.log" FAKE_ADB_STATE="$work"
+realpath_env=$PATH
+export PATH="$here/fake-bin:$PATH"
+echo "bash under test: $("$sh" -c 'echo $BASH_VERSION')   uname: $(uname -s)"
+
+pass=0; fail=0
+run() {   # label, expected exit code, command... (stdin is whatever the caller gives)
+  local label=$1 want=$2 out code r; shift 2
+  : > "$FAKE_ADB_LOG"
+  out=$("$@" 2>&1); code=$?
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  tr '\r' '\n' <<<"$out" | sed 's/^/    /'
+}
+check() {
+  if eval "$1"; then pass=$((pass+1)); echo "    PASS $1"; else fail=$((fail+1)); echo "    FAIL $1"; fi
+}
+logged() { grep -qF -- "$1" "$FAKE_ADB_LOG"; }
+png() { [[ $(head -c 4 "$1" | od -An -tx1 | tr -d ' \n') == 89504e47 ]]; }
+two=$'SERIALAAA\tdevice\nSERIALBBB\tdevice\n'
+fold='Display 111\n  powerMode=Off\nDisplay 222\n  powerMode=On\n'
+
+echo; echo "##### adb-shot"
+run "shot: one device" 0 "$sh" "$shot" -o out basket </dev/null
+check 'png out/basket.png'
+check 'logged "adb -s emulator-5554 exec-out screencap -p"'
+check 'logged "osascript"'     # clipboard copy went to the fake osascript
+run "shot: again, no overwrite" 0 "$sh" "$shot" -C -o out basket </dev/null
+check '[[ -f out/basket-2.png ]]'
+check '! logged "osascript"'   # -C: no clipboard
+run "shot: default name uses the model" 0 "$sh" "$shot" -C -o named </dev/null
+check 'ls named | grep -q "^screenshot-Pixel-9-Pro-"'
+FAKE_ADB_WARN=1 run "shot: warning text before the PNG is stripped" 0 "$sh" "$shot" -C -o out warn </dev/null
+check 'png out/warn.png'
+FAKE_ADB_NOPNG=1 run "shot: device returns no PNG" 1 "$sh" "$shot" -C -o out nopng </dev/null
+check '[[ ! -e out/nopng.png ]]'
+FAKE_ADB_SF=$fold run "shot: foldable, picks the display that is on" 0 "$sh" "$shot" -C -o out fold </dev/null
+check 'logged "screencap -p -d 222"'
+run "shot: -D given" 0 "$sh" "$shot" -C -D 7 -o out disp </dev/null
+check 'logged "screencap -p -d 7"'
+run "shot: -L" 0 "$sh" "$shot" -L </dev/null
+run "shot: -p opens the image" 0 "$sh" "$shot" -C -p -o out openme </dev/null
+check 'logged "open out/openme.png"'
+FAKE_OSASCRIPT_EXIT=1 run "shot: clipboard copy fails, shot still saved" 0 "$sh" "$shot" -o out clipfail </dev/null
+FAKE_ADB_DEVICES='' run "shot: no devices" 1 "$sh" "$shot" -C -o out x </dev/null
+FAKE_ADB_DEVICES=$'SERIALAAA\tunauthorized\n' run "shot: only an unauthorized device" 1 "$sh" "$shot" -C -o out x </dev/null
+FAKE_ADB_DEVICES=$two run "shot: two devices, stdin closed" 1 "$sh" "$shot" -C -o out x </dev/null
+FAKE_ADB_DEVICES=$two run "shot: two devices, '2' piped to the menu" 0 "$sh" "$shot" -C -o out second <<<"2"
+check 'logged "adb -s SERIALBBB exec-out"'
+FAKE_ADB_DEVICES=$two run "shot: two devices, bad then good answer piped" 0 "$sh" "$shot" -C -o out third <<<$'9\n1'
+check 'logged "adb -s SERIALAAA exec-out"'
+run "shot: too many args" 1 "$sh" "$shot" -C two words </dev/null
+run "shot: no adb on PATH" 1 env PATH="$work/empty" "$sh" "$shot" -C x </dev/null
+# -n reads Enter from /dev/tty, not stdin. Piping can't reach it.
+run "shot: -n 2 with Enter piped on stdin (reads /dev/tty)" 0 "$sh" "$shot" -C -n 2 -o out series <<<$'\n\n'
+
+echo; echo "##### adb-record"
+FAKE_ADB_REC_SECS=1 run "record: time limit, ends by itself" 0 "$sh" "$rec" -l 1 -o vids crash </dev/null
+check '[[ -f vids/crash.mp4 ]]'
+check 'logged "shell screenrecord --time-limit 1 /sdcard/screenrecord-"'
+check 'logged "settings put system show_touches 1"'
+check 'logged "settings put system show_touches 0"'   # restored on exit
+check 'logged "shell rm -f /sdcard/screenrecord-"'
+FAKE_ADB_REC_SECS=1 run "record: -T leaves show_touches alone" 0 "$sh" "$rec" -T -l 1 -o vids notaps </dev/null
+check '! logged "show_touches"'
+FAKE_ADB_REC_SECS=1 FAKE_ADB_API=33 run "record: API 33 falls back to 180s" 0 "$sh" "$rec" -T -o vids old </dev/null
+check 'logged "--time-limit 180"'
+FAKE_ADB_REC_SECS=1 run "record: API 35 unlimited" 0 "$sh" "$rec" -T -o vids new </dev/null
+check 'logged "--time-limit 0"'
+: > "$work/rec.events"
+start=$(date +%s)
+FAKE_ADB_REC_SECS=30 run "record: Enter piped on stdin stops a 30s recording" 0 "$sh" "$rec" -T -o vids enter < <(sleep 2; echo)
+echo "    took $(( $(date +%s) - start ))s; fake screenrecord says: $(tr '\n' ' ' < "$work/rec.events")"
+check 'grep -q stopped-by-signal "$work/rec.events"'
+FAKE_ADB_REC_SECS=1 FAKE_ADB_PULL_FAIL=1 run "record: pull fails" 1 "$sh" "$rec" -T -l 1 -o vids pullfail </dev/null
+check '! logged "shell rm -f"'
+FAKE_ADB_DEVICES='' run "record: no devices" 1 "$sh" "$rec" -o vids x </dev/null
+run "record: no adb on PATH" 1 env PATH="$work/empty" "$sh" "$rec" x </dev/null
+
+export PATH=$realpath_env
+echo
+echo "TOTAL pass=$pass fail=$fail"
+echo "left behind in HOME: $(ls -A "$HOME" | tr '\n' ' ')"
+(( fail == 0 ))

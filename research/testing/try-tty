@@ -1,0 +1,44 @@
+#!/bin/bash
+# Research for issue #4: prompts that read the terminal. What happens with no
+# terminal, and which ways of supplying one work the same on macOS and Linux?
+# Uses the fake adb. Not a test suite; it prints what happened.
+#
+#   research/testing/try-tty [bash-binary]     (default /bin/bash)
+sh=${1:-/bin/bash}
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cd "$work" || exit 1
+export HOME="$work" FAKE_ADB_LOG="$work/adb.log" FAKE_ADB_STATE="$work"
+export PATH="$here/fake-bin:$PATH"
+echo "bash under test: $("$sh" -c 'echo $BASH_VERSION')   uname: $(uname -s)"
+
+echo; echo "##### 1. is there a terminal here?"
+if [[ -t 0 ]]; then echo "stdin is a terminal"; else echo "stdin is not a terminal"; fi
+"$sh" -c 'read -r x </dev/tty' 2>&1; echo "read </dev/tty exit=$?"
+
+echo; echo "##### 2. adb-shot -n 2, Enter piped on stdin, no terminal"
+printf '\n\n' | "$sh" "$root/adb-shot/adb-shot" -C -n 2 -o piped series 2>&1
+echo "exit=${PIPESTATUS[1]}; files: $(ls piped 2>/dev/null | tr '\n' ' ')"
+
+echo; echo "##### 3. the same through script(1), which supplies a terminal"
+# script's arguments differ between macOS (BSD) and Linux (util-linux).
+if [[ $(uname -s) == Darwin ]]; then
+  printf '\n\n' | script -q /dev/null "$sh" "$root/adb-shot/adb-shot" -C -n 2 -o scripted series 2>&1
+else
+  printf '\n\n' | script -qec "$sh $root/adb-shot/adb-shot -C -n 2 -o scripted series" /dev/null 2>&1
+fi
+echo; echo "exit=$?; files: $(ls scripted 2>/dev/null | tr '\n' ' ')"
+
+echo; echo "##### 4. the same through expect, and Ctrl+C on adb-record"
+if command -v expect >/dev/null; then
+  expect -f "$here/tty.exp" "$sh" "$root" "$work"
+  echo "expect exit=$?; files: $(ls expected 2>/dev/null | tr '\n' ' ')"
+  echo "fake screenrecord says: $(tr '\n' ' ' < "$work/rec.events" 2>/dev/null)"
+  echo "show_touches calls: $(grep -c show_touches "$FAKE_ADB_LOG")"
+  grep show_touches "$FAKE_ADB_LOG" | sed 's/^/    /'
+else
+  echo "SKIP: expect not installed"
+fi
+exit 0

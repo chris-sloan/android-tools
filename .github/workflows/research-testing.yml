@@ -1,0 +1,197 @@
+# Research for issue #4 only. Lives on the research/testing-ci branch and is
+# not meant to be merged. Every step is allowed to fail so that all of them
+# report; read the logs, not the green tick.
+name: research-testing
+
+on:
+  push:
+    branches: ["research/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Plain bash, without the default -e, so a step prints "exit=N" and carries on.
+defaults:
+  run:
+    shell: bash {0}
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions and what is preinstalled
+        continue-on-error: true
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          sw_vers; uname -m; sysctl -n hw.ncpu hw.memsize
+          /bin/bash --version | head -1
+          echo "bash on PATH: $(which -a bash | tr '\n' ' ')"; bash --version | head -1
+          for t in ffmpeg ffprobe shellcheck shfmt bats expect adb emulator perl xxd script docker brew; do
+            printf '%-11s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+          done
+          expect -v || true
+          adb version || true
+          brew --version || true
+          awk --version 2>&1 | head -1 || true
+      - name: Time - brew install ffmpeg
+        continue-on-error: true
+        run: |
+          time brew install ffmpeg
+          ffmpeg -hide_banner -version | head -3
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libx264|videotoolbox|libvpx|[ ]aac' || true
+      - name: Does h264_videotoolbox work here?
+        continue-on-error: true
+        run: |
+          ffmpeg -nostdin -hide_banner -loglevel warning -y -f lavfi -i testsrc2=size=540x1200:rate=30 -t 3 \
+            -c:v h264_videotoolbox -b:v 2000k -pix_fmt yuv420p vt.mp4
+          echo "exit=$?"; ls -l vt.mp4 || true
+          echo "--- with -allow_sw 1"
+          ffmpeg -nostdin -hide_banner -loglevel warning -y -f lavfi -i testsrc2=size=540x1200:rate=30 -t 3 \
+            -c:v h264_videotoolbox -allow_sw 1 -b:v 2000k -pix_fmt yuv420p vt-sw.mp4
+          echo "exit=$?"; ls -l vt-sw.mp4 || true
+          echo "--- with -require_sw 0 -allow_sw 0 (hardware only)"
+          ffmpeg -nostdin -hide_banner -loglevel warning -y -f lavfi -i testsrc2=size=540x1200:rate=30 -t 3 \
+            -c:v h264_videotoolbox -allow_sw 0 -b:v 2000k -pix_fmt yuv420p vt-hw.mp4
+          echo "exit=$?"; ls -l vt-hw.mp4 || true
+      - name: Time - vid-tool/tests/run (the existing provisional tests)
+        continue-on-error: true
+        run: |
+          time vid-tool/tests/run > vid-tool-tests.log 2>&1
+          echo "exit=$?"
+          grep -E '^=== (FAIL|SKIP)|^    FAIL|### FAIL|^TOTAL' vid-tool-tests.log || true
+      - name: vid-tool test log (full)
+        continue-on-error: true
+        run: cat vid-tool-tests.log
+      - name: Time - brew install shellcheck, then lint
+        continue-on-error: true
+        run: |
+          time brew install shellcheck
+          shellcheck --version
+          shellcheck adb-shot/adb-shot adb-record/adb-record vid-tool/vid-tool install.sh vid-tool/tests/run
+          echo "shellcheck on the tools exit=$?"
+          echo "--- shellcheck on the newer-bash snippets (does it flag any as too new for 3.2?)"
+          for f in research/testing/bash4-snippets/*.sh; do
+            out=$(shellcheck -f gcc "$f"); echo "$(basename "$f"): exit=$? $(echo "$out" | sed 's|.*bash4-snippets/||' | tr '\n' ' ')"
+          done
+      - name: bash -n and newer-bash snippets on /bin/bash
+        continue-on-error: true
+        run: |
+          for f in adb-shot/adb-shot adb-record/adb-record vid-tool/vid-tool install.sh; do /bin/bash -n "$f"; echo "bash -n $f exit=$?"; done
+          research/testing/try-bash32
+      - name: Fake adb experiments
+        continue-on-error: true
+        run: time research/testing/try-fakes
+      - name: Terminal prompt experiments
+        continue-on-error: true
+        run: research/testing/try-tty
+      - name: install.sh experiment
+        continue-on-error: true
+        run: research/testing/try-install
+      - name: Time - brew install bats-core
+        continue-on-error: true
+        run: |
+          time brew install bats-core
+          bats --version
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions and what is preinstalled
+        continue-on-error: true
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          . /etc/os-release; echo "$PRETTY_NAME"; uname -m; nproc; free -g | head -2
+          bash --version | head -1
+          for t in ffmpeg ffprobe shellcheck shfmt bats expect adb emulator perl xxd script docker brew; do
+            printf '%-11s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+          done
+          shellcheck --version || true
+          adb version || true
+          awk --version 2>&1 | head -1 || true
+          ls -l /dev/kvm || true
+      - name: Time - apt-get install ffmpeg expect bats
+        continue-on-error: true
+        run: |
+          time sudo apt-get update -qq
+          time sudo apt-get install -y -qq ffmpeg expect
+          time sudo apt-get install -y -qq bats
+          ffmpeg -hide_banner -version | head -1
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libx264|videotoolbox|libvpx|[ ]aac' || true
+          expect -v; bats --version
+      - name: Lint with the preinstalled shellcheck
+        continue-on-error: true
+        run: |
+          shellcheck adb-shot/adb-shot adb-record/adb-record vid-tool/vid-tool install.sh vid-tool/tests/run
+          echo "shellcheck on the tools exit=$?"
+          for f in research/testing/bash4-snippets/*.sh; do
+            out=$(shellcheck -f gcc "$f"); echo "$(basename "$f"): exit=$? $(echo "$out" | sed 's|.*bash4-snippets/||' | tr '\n' ' ')"
+          done
+      - name: Time - vid-tool/tests/run on Linux (bash 5, GNU utilities)
+        continue-on-error: true
+        run: |
+          time vid-tool/tests/run > vid-tool-tests.log 2>&1
+          echo "exit=$?"
+          grep -E '^=== (FAIL|SKIP)|^    FAIL|### FAIL|^TOTAL' vid-tool-tests.log || true
+      - name: vid-tool test log (full)
+        continue-on-error: true
+        run: cat vid-tool-tests.log
+      - name: Experiments on the runner's own bash 5
+        continue-on-error: true
+        run: |
+          research/testing/try-bash32
+          time research/testing/try-fakes
+          research/testing/try-tty
+          research/testing/try-install
+      - name: Time - bash 3.2 in a container (docker.io/library/bash:3.2)
+        continue-on-error: true
+        run: |
+          time docker pull -q bash:3.2
+          docker run --rm bash:3.2 bash -c 'echo "$BASH_VERSION"; cat /etc/os-release | head -2; for t in awk sed grep stat perl xxd expect od; do printf "%-7s %s\n" "$t" "$(readlink -f "$(command -v $t)" 2>/dev/null || echo MISSING)"; done'
+          echo "--- bash -n under 3.2 in the container"
+          docker run --rm -v "$PWD:/repo" -w /repo bash:3.2 bash -c 'for f in adb-shot/adb-shot adb-record/adb-record vid-tool/vid-tool install.sh; do bash -n "$f"; echo "bash -n $f exit=$?"; done'
+          echo "--- newer-bash snippets under 3.2 in the container"
+          docker run --rm -v "$PWD:/repo" -w /repo bash:3.2 bash research/testing/try-bash32 /usr/local/bin/bash
+          echo "--- fake adb experiments under 3.2 in the container"
+          time docker run --rm -v "$PWD:/repo" -w /repo bash:3.2 bash research/testing/try-fakes /usr/local/bin/bash
+          echo "--- install.sh under 3.2 in the container"
+          docker run --rm -v "$PWD:/repo" -w /repo bash:3.2 bash research/testing/try-install /usr/local/bin/bash
+
+  emulator:
+    # Is a real Android emulator practical? Measures boot time and runs the two
+    # adb tools against it. -C because Linux has no osascript.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM for the runner user
+        continue-on-error: true
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot an emulator and run adb-shot and adb-record against it
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          disable-animations: true
+          script: |
+            adb devices
+            adb shell getprop ro.build.version.sdk
+            /bin/bash adb-shot/adb-shot -C -o out emu-shot < /dev/null
+            /bin/bash adb-shot/adb-shot -L < /dev/null
+            /bin/bash adb-record/adb-record -l 3 -o out emu-rec < /dev/null
+            adb shell settings get system show_touches
+            ls -l out
+            file out/*

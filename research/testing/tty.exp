@@ -1,0 +1,38 @@
+#!/usr/bin/expect -f
+# Research for issue #4. Called by try-tty:  tty.exp <bash> <repo root> <work dir>
+lassign $argv sh root work
+set timeout 30
+set failed 0
+cd $work
+
+proc finish {label want} {
+  global failed
+  expect {
+    eof { }
+    timeout { puts "\n### FAIL $label: timed out"; incr failed; catch {close}; catch {wait}; return }
+  }
+  set code [lindex [wait] 3]
+  if {$code == $want} { puts "\n### PASS $label exit=$code" } else { puts "\n### FAIL $label exit=$code (want $want)"; incr failed }
+}
+
+puts "\n##### adb-shot -n 2: Enter for each shot (the prompt reads /dev/tty)"
+spawn $sh $root/adb-shot/adb-shot -C -n 2 -o expected series
+expect "Shot 1/2: press Enter"
+send "\r"
+expect "Saved: expected/series-1.png"
+expect "Shot 2/2: press Enter"
+send "\r"
+expect "Saved: expected/series-2.png"
+finish "shot series" 0
+
+puts "\n##### adb-record: Ctrl+C stops a 30s recording, video is still pulled"
+set env(FAKE_ADB_REC_SECS) 30
+set env(FAKE_ADB_LOG) $work/adb.log
+spawn $sh $root/adb-record/adb-record -o expected ctrlc
+expect "press Enter (or Ctrl+C) to stop."
+sleep 1
+send "\003"
+expect "Saved: expected/ctrlc.mp4"
+finish "record ctrl-c" 0
+
+exit [expr {$failed > 0}]
