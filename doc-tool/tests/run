@@ -65,6 +65,30 @@ mkdir plain && echo "# hi" > plain/a.md                      # not a git repo
 mkdir nomd && (cd nomd && git init -q && commit 2022-01-01 x x@example.com "Text" a.txt)
 git clone -q --depth 1 "file://$wiki" shallow 2>/dev/null
 
+# A conflict resolved by hand in a merge commit counts as an edit.
+mkdir merged && (cd merged && git init -q -b main &&
+  commit 2020-01-01 "Ann Old" ann@example.com "Add" a.md b.md &&
+  git switch -qc topic && commit 2020-02-01 "Bob Dev" bob@example.com "Topic" a.md &&
+  git switch -q main && commit 2020-03-01 "Ann Old" ann@example.com "Main" a.md &&
+  { git -c user.name="Mel Merge" -c user.email=mel@example.com merge -q topic >/dev/null 2>&1; [[ -f .git/MERGE_HEAD ]]; } && echo resolved > a.md && git add a.md &&
+  GIT_AUTHOR_DATE=2025-06-01T10:00:00 GIT_COMMITTER_DATE=2025-06-01T10:00:00 \
+    git -c user.name="Mel Merge" -c user.email=mel@example.com commit -qm "Merge topic" &&
+  git switch -qc clean && commit 2025-07-01 "Bob Dev" bob@example.com "Clean branch" b.md &&
+  git switch -q main && GIT_AUTHOR_DATE=2025-08-01T10:00:00 GIT_COMMITTER_DATE=2025-08-01T10:00:00 \
+    git -c user.name="Mel Merge" -c user.email=mel@example.com merge -q --no-ff -m "Merge clean" clean)
+
+# Names with quotes and backslashes; one with a tab, which is left out.
+mkdir odd && (cd odd && git init -q &&
+  commit 2021-01-01 "Ann Old" ann@example.com "Odd names" 'Say "hi".md' 'back\slash.md' "$(printf 'tab\there.md')")
+
+# Staged pages, no commits yet.
+mkdir fresh && (cd fresh && git init -q && echo "# new" > new.md && git add new.md)
+
+# Two people with the same name and different emails.
+mkdir alex && (cd alex && git init -q &&
+  commit 2021-01-01 "Alex" alex.one@example.com "One" one.md &&
+  commit 2021-02-01 "Alex" alex.two@example.com "Two" two.md)
+
 # --- Helpers ----------------------------------------------------------------------
 pass=0; fail=0; skip=0
 out=""
@@ -148,6 +172,16 @@ run "-O 1w" 0 T -O 1w -b cat "$wiki";                     check 'has "not edited
 run "subfolder" 0 T -a "$wiki/android"
 check 'has "flows.md" && ! has "android/" && has "2 pages."'
 run "shallow clone note" 0 T -a shallow;                  check 'has "shallow clone"'
+run "merge that resolved a conflict" 0 T -n merged
+check '[[ $(git -C merged rev-list --merges --count HEAD) == 2 ]]'   # the setup really merged twice
+check 'grep -q "2025-06-01  Mel Merge          a.md" <<<"$out"'
+check 'grep -q "2025-07-01  Bob Dev            b.md" <<<"$out"'   # a clean merge is not an edit
+run "names with quotes and backslashes" 0 T -a odd
+check 'has "Say \"hi\".md" && has "back\\slash.md" && has "2 pages."'
+check 'has "left out 1 page whose names contain a tab"'
+run "search finds them too" 0 T -s "odd names" odd;        check 'has "Say \"hi\".md" && has "2 pages containing"'
+run "no commits yet" 0 T -a fresh;                         check 'has "uncommitted" && has "new.md"'
+run "no commits yet, report" 0 T -r -C fresh;             check 'has "1 page in 1 folder"'
 
 # --- Authors ----------------------------------------------------------------------------
 run "authors" 0 T -u "$wiki"
@@ -157,6 +191,8 @@ check 'grep -qE "^ +3 +3 .*Bot <bot@example.com>" <<<"$out"'
 run "authors with filters" 0 T -u -x chore -s releases "$wiki"
 check 'has "Bob Dev" && ! has "Bot" && has "2 pages containing"'
 run "authors, no pages" 0 T -u -s zzz "$wiki";             check 'has "No pages"'
+run "authors with the same name" 0 T -u alex
+check '(( $(grep -cE "^ +1 +1  .*Alex <alex\.(one|two)@example.com>" <<<"$out") == 2 ))'
 
 # --- Reports -------------------------------------------------------------------------------
 run "summary" 0 T -r -x chore "$wiki"

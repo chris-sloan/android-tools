@@ -64,8 +64,11 @@ EOF
 
 die() { echo "$*" >&2; exit 1; }
 
+# "1 page", "3 pages"
+pages() { if (( $1 == 1 )); then echo "1 page"; else echo "$1 pages"; fi; }
+
 # --- Options -------------------------------------------------------------------
-mode="" search="" author="" age="" save="" copy=1 list_only=0 only_gone=0 limit=$page_limit ignores=()
+mode="" search="" author="" age="" save="" copy=1 list_only=0 only_gone=0 limit=$page_limit ignores=() cli_ignores=()
 
 set_mode() {
   if [[ -n $mode && $mode != "$1" ]]; then die "Pick only one of -a, -n, -u, -r and -R."; fi
@@ -84,7 +87,7 @@ while getopts "anurRs:b:gO:x:m:f:Clh" opt; do
     g) only_gone=1 ;;
     m) limit=$OPTARG ;;
     O) age=$OPTARG ;;
-    x) ignores+=("$OPTARG") ;;
+    x) ignores+=("$OPTARG"); cli_ignores+=("$OPTARG") ;;
     f) save=$OPTARG ;;
     C) copy=0 ;;
     l) list_only=1 ;;
@@ -180,15 +183,33 @@ fi
 #   last edit (unix time), last edit (YYYY-MM-DD), path, last editor,
 #   commits, editors, 1 if every editor is in the gone list
 # editors is a list joined by \036, each "name\037email\037time\037date".
-git -C "$dir" -c core.quotepath=false ls-files -- '*.md' '*.markdown' > "$tmp/tracked"
+#
+# git separates names with NUL (-z) so quotes and backslashes in them come
+# through as they are. Pages whose names hold a tab or line break are left
+# out, since those characters separate the fields and lines below.
 : > "$tmp/files"
-while IFS= read -r f; do
-  if [[ -f "$dir/$f" ]]; then printf '%s\n' "$f" >> "$tmp/files"; fi
-done < "$tmp/tracked"
+odd=0
+while IFS= read -r -d '' f; do
+  case $f in
+    *$'\t'*|*$'\n'*) odd=$((odd + 1)) ;;
+    *) if [[ -f "$dir/$f" ]]; then printf '%s\n' "$f" >> "$tmp/files"; fi ;;
+  esac
+done < <(git -C "$dir" ls-files -z -- '*.md' '*.markdown')
+if (( odd > 0 )); then
+  echo "Note: left out $(pages "$odd") whose names contain a tab or line break." >&2
+fi
 [[ -s $tmp/files ]] || die "No Markdown pages that git tracks in $dir."
 
-git -C "$dir" -c core.quotepath=false log --no-color --date=short --relative \
-  --format='%x01%at%x09%ad%x09%aN%x09%aE%x09%s' --name-only -- '*.md' '*.markdown' > "$tmp/log"
+# --cc lists the pages a merge commit itself changed, such as a conflict
+# resolved by hand, and not the ones it only brought in from a branch.
+# With -z, each name ends in NUL; tr turns them into lines.
+if git -C "$dir" rev-parse --verify -q HEAD >/dev/null; then
+  git -C "$dir" log -z --cc --no-color --date=short --relative \
+    --format='%x01%at%x09%ad%x09%aN%x09%aE%x09%s' --name-only -- '*.md' '*.markdown' |
+    tr '\0' '\n' > "$tmp/log"
+else
+  : > "$tmp/log"   # no commits yet: every page shows as uncommitted
+fi
 
 ign_lc=$(printf '%s' "$ignore" | tr '[:upper:]' '[:lower:]')
 awk -F'\t' -v OFS='\t' -v ign="$ign_lc" -v now="$now" '
@@ -239,7 +260,7 @@ awk -F'\t' -v OFS='\t' -v gl="$gone" "$gone_awk"'
 # --- Filters -----------------------------------------------------------------------
 : > "$tmp/hits"
 if [[ -n $search ]]; then
-  git -C "$dir" -c core.quotepath=false grep -l -i -F -e "$search" -- '*.md' '*.markdown' > "$tmp/hits" 2>/dev/null || true
+  { git -C "$dir" grep -z -l -i -F -e "$search" -- '*.md' '*.markdown' 2>/dev/null || true; } | tr '\0' '\n' > "$tmp/hits"
 fi
 
 # filter <cutoff unix time, or empty for none> < pages > pages
@@ -272,8 +293,6 @@ age_words() {
   echo "$n $w"
 }
 
-# "1 page", "3 pages"
-pages() { if (( $1 == 1 )); then echo "1 page"; else echo "$1 pages"; fi; }
 
 # What the filters were, for messages.
 describe() {
@@ -399,13 +418,14 @@ show_authors() {
         pages[k]++
         if (p[3] + 0 > last[k] + 0) { last[k] = p[3]; lastd[k] = p[4] }
       }
-      if ($4 != "-") latest[$4]++
+      # Editors are newest first, so the first one edited the page last.
+      if (n > 0) { split(eds[1], p, "\037"); k = tolower(p[2]); if (k == "") k = p[1]; latest[k]++ }
     }
     END {
       for (k in name) {
         who = name[k]; if (mail[k] != "") who = who " <" mail[k] ">"
         if (isgone(who)) who = who " (left)"
-        print pages[k], latest[name[k]] + 0, lastd[k], who
+        print pages[k], latest[k] + 0, lastd[k], who
       }
     }' "$tmp/sel" | sort -t $'\t' -k1,1nr -k3,3r | awk -F'\t' '{ printf "%5d %7d  %-11s %s\n", $1, $2, $3, $4 }'
   echo "LATEST: pages where theirs is the most recent edit. $(pages "$(wc -l < "$tmp/sel" | tr -d ' ')")$(describe "$age")." >&2
@@ -547,6 +567,13 @@ esac
 if (( asked )); then
   hint="doc-tool -$mode"
   [[ -n $search ]] && hint+=" -s $(printf '%q' "$search")"
+  [[ -n $author ]] && hint+=" -b $(printf '%q' "$author")"
+  (( only_gone )) && hint+=" -g"
+  [[ -n $age ]] && hint+=" -O $age"
+  for x in "${cli_ignores[@]}"; do hint+=" -x $(printf '%q' "$x")"; done
+  [[ $limit != "$page_limit" ]] && hint+=" -m $limit"
+  [[ -n $save ]] && hint+=" -f $(printf '%q' "$save")"
+  (( copy )) || hint+=" -C"
   echo "Same thing in one line: $hint $(printf '%q' "$dir")"
 fi
 exit 0

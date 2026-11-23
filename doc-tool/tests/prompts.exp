@@ -7,9 +7,22 @@ set tool [lindex $argv 0]
 set wiki [lindex $argv 1]
 set empty [lindex $argv 2]
 proc fail {why} { puts "\nFAIL: $why"; exit 1 }
+# start runs doc-tool. After that, any wait with no timeout clause of its
+# own, such as a bare "expect eof", fails instead of carrying on when
+# doc-tool hangs or ends too early. (expect_after applies to the process
+# spawned just before it, so it's set again for each one.)
+proc start {args} {
+  uplevel 1 [list spawn /bin/bash {*}$args]
+  uplevel 1 {
+    expect_after {
+      timeout { fail "timed out (doc-tool hung?)" }
+      eof { fail "doc-tool ended before it was expected to" }
+    }
+  }
+}
 
 # 1. The menu, then a search, then open the first page, then quit.
-spawn /bin/bash $tool $wiki
+start $tool $wiki
 expect "What would you like to see" {} timeout { fail "no menu" }
 expect "> " { send "1\r" } timeout { fail "no menu prompt" }
 expect "Only pages containing" { send "release\r" } timeout { fail "no search prompt" }
@@ -21,7 +34,7 @@ expect "Same thing in one line: doc-tool -a -s release" {} timeout { fail "no on
 expect eof
 
 # 2. Paging: 8 pages, 3 at a time.
-spawn /bin/bash $tool -n -m 3 $wiki
+start $tool -n -m 3 $wiki
 expect "1) " {} timeout { fail "no first row" }
 expect "Pages 1-3 of 8. Number to open, Enter for more, q to quit: " { send "\r" } timeout { fail "no first page" }
 expect "4) " {} timeout { fail "no row 4" }
@@ -38,17 +51,24 @@ expect "Pages 7-8 of 8." { send "\r" } timeout { fail "didn't stay on the page a
 expect "Pages 1-3 of 8." { send "q\r" } timeout { fail "Enter on the last page didn't start again" }
 expect eof
 
-# 3. With a pager other than less, LESS is left alone.
+# 3. The one-line hint keeps every option given, not just the menu choices.
+start $tool -O 30y -x chore -m 5 -C $wiki
+expect "> " { send "4\r" } timeout { fail "no menu with options" }
+expect "Only pages containing" { send "\r" } timeout { fail "no search prompt with options" }
+expect "Same thing in one line: doc-tool -r -O 30y -x chore -m 5 -C " {} timeout { fail "hint dropped options" }
+expect eof
+
+# 4. With a pager other than less, LESS is left alone.
 set env(PAGER) more
-spawn /bin/bash $tool -a $wiki
+start $tool -a $wiki
 expect "Number to open" { send "1\r" } timeout { fail "no picker with PAGER=more" }
 expect "Number to open" { send "q\r" } timeout { fail "no prompt after opening with PAGER=more" }
 expect eof
 set env(PAGER) less
 
-# 4. -a in a terminal goes straight to the picker; glow missing is explained.
+# 5. -a in a terminal goes straight to the picker; glow missing is explained.
 set env(PATH) "$empty:/usr/bin:/bin"
-spawn /bin/bash $tool -a $wiki
+start $tool -a $wiki
 expect "Number to open" { send "1\r" } timeout { fail "no picker" }
 expect "glow isn't installed" {} timeout { fail "no glow message" }
 expect eof

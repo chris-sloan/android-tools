@@ -170,8 +170,10 @@ A skipped commit doesn't count as an edit, and its author doesn't count as an ed
 
 ## How it works
 
-- `git ls-files` lists the pages. Files git doesn't track yet aren't pages. A page that is staged but never committed shows as `uncommitted`.
+- `git ls-files` lists the pages. Files git doesn't track yet aren't pages. A page that is staged but never committed shows as `uncommitted`, including in a repo with no commits yet.
+- Page names with quotes, backslashes or spaces are fine. A name with a tab or line break in it is left out, with a note saying how many.
 - One `git log` over the folder gives every page's last edit, its editors and their commit dates, so a big wiki is still quick.
+- A merge commit counts as an edit to a page only when it changed the page itself, such as a conflict resolved by hand. Pages it just brought in from a branch keep the dates and editors of their own commits.
 - The date is the author date: when the edit was written, not when it was merged or rebased.
 - Names and emails go through the repo's `.mailmap`, so one person with two emails can be counted once.
 - `-s` searches with `git grep`, so it reads the files as they are now.
