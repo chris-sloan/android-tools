@@ -1,0 +1,545 @@
+#!/usr/bin/env bash
+# doc-tool: find out-of-date Markdown pages in a git folder, using git's
+# record of when each page was last edited, and open them in glow.
+# Read-only: never changes the folder or its history.
+set -eo pipefail
+
+# --- Defaults (edit these to taste) ------------------------------------------
+report_age=12m   # -r, -R: pages not edited for this long count as stale
+report_dir="$HOME/Desktop"   # -r, -R: folder each report is saved in, as
+                             #     <folder>-status-<date>.txt. Keep it outside
+                             #     the wiki. Empty = don't save (-f still does).
+gone=""          # people who have left: parts of names or emails, any case,
+                 #     separated by |, e.g. "ann@example.com|bob old".
+                 #     Used by -g, -u and the reports.
+page_limit=20    # -a, -n: how many pages to show (-m). 0 = all
+ignore_re=""     # -x: skip commits whose message matches this, e.g.
+                 #     "reformat|bulk rename|^chore". Empty = skip none.
+
+usage() {
+  cat <<EOF
+Usage: doc-tool [-a | -n | -u | -r | -R] [-s text] [-b author] [-g] [-O age]
+                [-x pattern] [-m count] [-f file] [-C] [-l] [folder]
+
+Run it with no options to choose from a menu.
+
+  folder        A git repo, or any folder inside one (default: this folder).
+                Every .md and .markdown file under it that git tracks is
+                a page.
+
+What to show (pick one; left out: a menu asks, or -a when not in a terminal):
+  -a            Pages, oldest first, then pick one to open in glow
+  -n            Pages, newest first, then pick one to open in glow
+  -u            Who has edited the pages: how many each, and when last.
+                People in the gone list are marked (left).
+  -r            Status summary: numbers for the whole folder, such as how
+                many pages are stale (not edited in $report_age, or -O)
+  -R            Full status report: the summary, then every stale page by
+                folder, and every page whose editors have all left
+                Both reports are printed, copied to the clipboard and saved
+                in ${report_dir:-(nowhere: report_dir is empty)}.
+
+Filters (work with every mode):
+  -s text       Only pages whose name or contents contain this text
+  -b author     Only pages this person has edited (part of a name or email)
+  -g            Only pages whose editors have all left (the gone list at
+                the top of doc-tool)
+  -O age        Only pages not edited for this long: 30d, 8w, 6m or 2y.
+                With -r and -R, the age that counts as stale.
+  -x pattern    Skip commits whose message matches this pattern (extended
+                regex, any case), so bulk reformats don't count as edits.
+                Repeat to add more.
+
+Other:
+  -f file       With -r or -R, save the report to this file instead
+  -C            With -r or -R, don't copy the report to the clipboard
+  -m count      With -a or -n, show this many pages at a time (default
+                $page_limit; 0 shows them all). In a terminal, Enter shows more.
+  -l            Just print the list; don't offer to open a page
+  -h            Show this help
+
+Dates are each page's last commit, not the file's date on disk.
+EOF
+}
+
+die() { echo "$*" >&2; exit 1; }
+
+# --- Options -------------------------------------------------------------------
+mode="" search="" author="" age="" save="" copy=1 list_only=0 only_gone=0 limit=$page_limit ignores=()
+
+set_mode() {
+  if [[ -n $mode && $mode != "$1" ]]; then die "Pick only one of -a, -n, -u, -r and -R."; fi
+  mode=$1
+}
+
+while getopts "anurRs:b:gO:x:m:f:Clh" opt; do
+  case $opt in
+    a) set_mode a ;;
+    n) set_mode n ;;
+    u) set_mode u ;;
+    r) set_mode r ;;
+    R) set_mode R ;;
+    s) search=$OPTARG ;;
+    b) author=$OPTARG ;;
+    g) only_gone=1 ;;
+    m) limit=$OPTARG ;;
+    O) age=$OPTARG ;;
+    x) ignores+=("$OPTARG") ;;
+    f) save=$OPTARG ;;
+    C) copy=0 ;;
+    l) list_only=1 ;;
+    h) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+if (( $# > 1 )); then
+  die "Too many arguments; quote folder names that contain spaces."
+fi
+dir=${1:-.}
+
+command -v git >/dev/null || die "doc-tool needs git. Install it with: xcode-select --install"
+
+# "6m" -> seconds. 1 month = 30 days, 1 year = 365 days.
+age_secs() {
+  local n=${1%?} unit=${1: -1}
+  [[ $1 =~ ^[0-9]+[dwmy]$ ]] || return 1
+  case $unit in
+    d) echo $(( n * 86400 )) ;;
+    w) echo $(( n * 7 * 86400 )) ;;
+    m) echo $(( n * 30 * 86400 )) ;;
+    y) echo $(( n * 365 * 86400 )) ;;
+  esac
+}
+
+if [[ -n $age ]]; then
+  age_secs "$age" >/dev/null || die "-O needs an age like 30d, 8w, 6m or 2y (got \"$age\")."
+fi
+age_secs "$report_age" >/dev/null || die "report_age at the top of doc-tool must be like 12m (got \"$report_age\")."
+[[ $page_limit =~ ^[0-9]+$ ]] || die "page_limit at the top of doc-tool must be a whole number (got \"$page_limit\")."
+[[ $limit =~ ^[0-9]+$ ]] || die "-m needs a number of pages, e.g. -m 20, or -m 0 for all (got \"$limit\")."
+if [[ -n $save && $mode != r && $mode != R ]]; then die "-f only works with -r and -R."; fi
+if (( only_gone )) && [[ -z $gone ]]; then
+  die "-g needs the people who have left: set gone=\"...\" at the top of doc-tool."
+fi
+
+if [[ -n $ignore_re ]]; then ignores=("$ignore_re" "${ignores[@]}"); fi
+ignore=""
+if (( ${#ignores[@]} > 0 )); then
+  ignore=$(IFS='|'; echo "${ignores[*]}")
+  # grep exits 2 on a bad pattern, 1 on no match.
+  rc=0; echo | grep -qE "$ignore" 2>/dev/null || rc=$?
+  (( rc != 2 )) || die "-x needs a valid pattern (got \"$ignore\")."
+fi
+
+[[ -d $dir ]] || die "No such folder: $dir"
+dir=$(cd "$dir" && pwd)
+git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1 ||
+  die "$dir isn't in a git repo. doc-tool reads each page's dates from git."
+if [[ $(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null) == true ]]; then
+  echo "Note: this is a shallow clone, so older history is missing and some dates may be wrong." >&2
+  echo "      Fetch the rest with: git -C $(printf '%q' "$dir") fetch --unshallow" >&2
+fi
+
+interactive=0
+if [[ -t 0 && -t 1 ]] && (( ! list_only )); then interactive=1; fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+now=$(date +%s)
+
+# --- Menu ------------------------------------------------------------------------
+asked=0   # 1 once anything was chosen from a prompt; prints the one-line command at the end
+
+if [[ -z $mode ]]; then
+  if (( interactive )); then
+    echo "What would you like to see in $dir?"
+    PS3="> "
+    choices=("Pages, oldest first" "Pages, newest first" "Who edits these pages" "Status summary" "Full status report")
+    select _ in "${choices[@]}"; do
+      case $REPLY in
+        1) mode=a; break ;;
+        2) mode=n; break ;;
+        3) mode=u; break ;;
+        4) mode=r; break ;;
+        5) mode=R; break ;;
+      esac
+    done
+    [[ -n $mode ]] || exit 1
+    if [[ -z $search ]]; then
+      read -r -p "Only pages containing (Enter for all): " search || true
+    fi
+    asked=1
+  else
+    mode=a
+  fi
+fi
+
+# --- Read every page's history in one pass ------------------------------------------
+# pages: one line per page, tab-separated:
+#   last edit (unix time), last edit (YYYY-MM-DD), path, last editor,
+#   commits, editors, 1 if every editor is in the gone list
+# editors is a list joined by \036, each "name\037email\037time\037date".
+git -C "$dir" -c core.quotepath=false ls-files -- '*.md' '*.markdown' > "$tmp/tracked"
+: > "$tmp/files"
+while IFS= read -r f; do
+  if [[ -f "$dir/$f" ]]; then printf '%s\n' "$f" >> "$tmp/files"; fi
+done < "$tmp/tracked"
+[[ -s $tmp/files ]] || die "No Markdown pages that git tracks in $dir."
+
+git -C "$dir" -c core.quotepath=false log --no-color --date=short --relative \
+  --format='%x01%at%x09%ad%x09%aN%x09%aE%x09%s' --name-only -- '*.md' '*.markdown' > "$tmp/log"
+
+ign_lc=$(printf '%s' "$ignore" | tr '[:upper:]' '[:lower:]')
+awk -F'\t' -v OFS='\t' -v ign="$ign_lc" -v now="$now" '
+  NR == FNR { want[$0] = 1; order[++nw] = $0; next }
+  substr($0, 1, 1) == "\001" {
+    ct = substr($1, 2); d = $2; an = $3; ae = $4; s = $5
+    for (i = 6; i <= NF; i++) s = s "\t" $i
+    skip = (ign != "" && tolower(s) ~ ign)
+    next
+  }
+  $0 == "" || !($0 in want) { next }
+  {
+    f = $0
+    # The log is newest first, so these end up holding the oldest commit,
+    # used when every commit to a page was skipped by -x.
+    oct[f] = ct; od[f] = d; oa[f] = an; oe[f] = ae
+    if (skip) next
+    if (!(f in lct)) { lct[f] = ct; ld[f] = d; la[f] = an }
+    cnt[f]++
+    k = f SUBSEP tolower(ae)
+    if (!(k in seen)) {
+      seen[k] = 1
+      e = an "\037" ae "\037" ct "\037" d
+      au[f] = (f in au) ? au[f] "\036" e : e
+    }
+  }
+  END {
+    for (i = 1; i <= nw; i++) {
+      f = order[i]
+      if (f in lct)      print lct[f], ld[f], f, la[f], cnt[f], au[f]
+      else if (f in oct) print oct[f], od[f], f, oa[f], 0, oa[f] "\037" oe[f] "\037" oct[f] "\037" od[f]
+      else               print now, "uncommitted", f, "-", 0, ""
+    }
+  }' "$tmp/files" "$tmp/log" > "$tmp/history"
+
+# Shared awk code: isgone("name <email>") is 1 if it matches the gone list.
+gone_awk='
+  BEGIN { n = split(tolower(gl), raw, "|"); ngone = 0
+          for (i = 1; i <= n; i++) if (raw[i] != "") gonel[++ngone] = raw[i] }
+  function isgone(s,  i) { s = tolower(s)
+    for (i = 1; i <= ngone; i++) if (index(s, gonel[i])) return 1
+    return 0 }'
+awk -F'\t' -v OFS='\t' -v gl="$gone" "$gone_awk"'
+  { n = split($6, eds, "\036"); all = (n > 0 && ngone > 0)
+    for (i = 1; i <= n && all; i++) { split(eds[i], p, "\037"); if (!isgone(p[1] " <" p[2] ">")) all = 0 }
+    print $1, $2, $3, $4, $5, $6, all }' "$tmp/history" > "$tmp/pages"
+
+# --- Filters -----------------------------------------------------------------------
+: > "$tmp/hits"
+if [[ -n $search ]]; then
+  git -C "$dir" -c core.quotepath=false grep -l -i -F -e "$search" -- '*.md' '*.markdown' > "$tmp/hits" 2>/dev/null || true
+fi
+
+# filter <cutoff unix time, or empty for none> < pages > pages
+filter() {
+  awk -F'\t' -v OFS='\t' -v cut="$1" -v q="$(printf '%s' "$search" | tr '[:upper:]' '[:lower:]')" \
+      -v who="$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')" -v og="$only_gone" '
+    FILENAME == ARGV[1] { hit[$0] = 1; next }
+    og == 1 && $7 != 1 { next }
+    cut != "" && $1 + 0 >= cut + 0 { next }
+    q != "" && !($3 in hit) && index(tolower($3), q) == 0 { next }
+    who != "" {
+      n = split($6, eds, "\036"); found = 0
+      for (i = 1; i <= n; i++) {
+        split(eds[i], p, "\037")
+        if (index(tolower(p[1]), who) || index(tolower(p[2]), who)) { found = 1; break }
+      }
+      if (!found) next
+    }
+    { print }' "$tmp/hits" -
+}
+
+cutoff=""
+[[ -n $age ]] && cutoff=$(( now - $(age_secs "$age") ))
+
+# "6m" -> "6 months"
+age_words() {
+  local n=${1%?} w
+  case ${1: -1} in d) w=day ;; w) w=week ;; m) w=month ;; y) w=year ;; esac
+  (( n == 1 )) || w+=s
+  echo "$n $w"
+}
+
+# "1 page", "3 pages"
+pages() { if (( $1 == 1 )); then echo "1 page"; else echo "$1 pages"; fi; }
+
+# What the filters were, for messages.
+describe() {
+  local d=""
+  [[ -n $search ]] && d+=" containing \"$search\""
+  [[ -n $author ]] && d+=" edited by \"$author\""
+  (( only_gone )) && d+=" whose editors have all left"
+  [[ -n $1 ]] && d+=" not edited in $(age_words "$1")"
+  printf '%s' "$d"
+}
+
+# Pages as aligned rows: path, tab, "age  date  editor  path".
+rows() {
+  awk -F'\t' -v now="$now" '
+    function age(s,  d) {
+      d = int((now - s) / 86400); if (d < 0) d = 0
+      if (d < 60) return d "d"
+      if (d < 730) return int(d / 30.44) "mo"
+      return sprintf("%.1fy", d / 365.25)
+    }
+    { who = $4; if (length(who) > 18) who = substr(who, 1, 17) "~"
+      printf "%s\t%-6s %-11s %-18s %s\n", $3, age($1), $2, who, $3 }'
+}
+header=$(printf '%-6s %-11s %-18s %s' AGE "LAST EDIT" "EDITED BY" PAGE)
+
+# --- Open a page in glow ---------------------------------------------------------------
+open_page() {
+  command -v glow >/dev/null || die "glow isn't installed. Install it with: brew install glow"
+  glow -p "$1" || echo "glow couldn't show $1." >&2
+}
+
+# pick_page <rows file> <what the pages are, for the heading>
+# Shows the pages a screenful at a time (the page limit, -m). Read from
+# standard input one line at a time, so numbers of any length work.
+pick_page() {
+  local paths=() labels=() p l total size start=0 end i w reply more
+  while IFS=$'\t' read -r p l; do
+    paths+=("$p"); labels+=("$l")
+  done < "$1"
+  total=${#paths[@]}
+  size=$limit
+  (( size > 0 && size < total )) || size=$total
+  w=${#total}
+  echo "$2" >&2
+  while :; do
+    end=$(( start + size )); (( end > total )) && end=$total
+    printf '%*s  %s\n' "$w" "" "$header" >&2
+    for (( i = start; i < end; i++ )); do
+      printf '%*d) %s\n' "$w" $(( i + 1 )) "${labels[i]}" >&2
+    done
+    if (( size == total )); then
+      more=""
+    elif (( end < total )); then
+      more=", Enter for more"
+    else
+      more=", Enter to start again"
+    fi
+    (( start > 0 )) && more+=", b for back"
+    if ! read -r -p "Pages $(( start + 1 ))-$end of $total. Number to open$more, q to quit: " reply; then
+      echo >&2; break
+    fi
+    case $reply in
+      q|Q) break ;;
+      "") if (( end < total )); then start=$end; else start=0; fi ;;
+      b|B) start=$(( start - size )); (( start < 0 )) && start=0 ;;
+      *)
+        if [[ $reply =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= total )); then
+          open_page "$dir/${paths[reply-1]}"
+        else
+          echo "Type a number from 1 to $total, or q to quit." >&2
+        fi ;;
+    esac
+  done
+}
+
+# --- Pages, oldest or newest first ---------------------------------------------------------
+show_pages() {
+  local order=-k1,1n
+  [[ $mode == n ]] && order=-k1,1nr
+  filter "$cutoff" < "$tmp/pages" | sort -t $'\t' "$order" -k3,3 | rows > "$tmp/rows"
+  local count; count=$(wc -l < "$tmp/rows" | tr -d ' ')
+  if (( count == 0 )); then
+    echo "No pages$(describe "$age")." >&2
+    return 0
+  fi
+  if (( interactive )); then
+    pick_page "$tmp/rows" "$(pages "$count")$(describe "$age")."
+    return 0
+  fi
+  local shown=$count note
+  if (( limit > 0 && count > limit )); then
+    shown=$limit
+    head -n "$limit" "$tmp/rows" > "$tmp/shown" && mv "$tmp/shown" "$tmp/rows"
+  fi
+  if (( shown < count )); then
+    note="Showing $shown of $(pages "$count")$(describe "$age"). -m sets how many; -m 0 shows them all."
+  else
+    note="$(pages "$count")$(describe "$age")."
+  fi
+  echo "$header"
+  cut -f2- "$tmp/rows"
+  echo "$note" >&2
+}
+
+# --- Who edits these pages ---------------------------------------------------------------
+show_authors() {
+  filter "$cutoff" < "$tmp/pages" > "$tmp/sel"
+  if [[ ! -s $tmp/sel ]]; then echo "No pages$(describe "$age")." >&2; return 0; fi
+  printf '%5s %7s  %-11s %s\n' PAGES LATEST "LAST EDIT" NAME
+  awk -F'\t' -v OFS='\t' -v gl="$gone" "$gone_awk"'
+    {
+      n = split($6, eds, "\036")
+      for (i = 1; i <= n; i++) {
+        split(eds[i], p, "\037"); k = tolower(p[2]); if (k == "") k = p[1]
+        if (!(k in name)) { name[k] = p[1]; mail[k] = p[2] }
+        pages[k]++
+        if (p[3] + 0 > last[k] + 0) { last[k] = p[3]; lastd[k] = p[4] }
+      }
+      if ($4 != "-") latest[$4]++
+    }
+    END {
+      for (k in name) {
+        who = name[k]; if (mail[k] != "") who = who " <" mail[k] ">"
+        if (isgone(who)) who = who " (left)"
+        print pages[k], latest[name[k]] + 0, lastd[k], who
+      }
+    }' "$tmp/sel" | sort -t $'\t' -k1,1nr -k3,3r | awk -F'\t' '{ printf "%5d %7d  %-11s %s\n", $1, $2, $3, $4 }'
+  echo "LATEST: pages where theirs is the most recent edit. $(pages "$(wc -l < "$tmp/sel" | tr -d ' ')")$(describe "$age")." >&2
+}
+
+# --- Status reports ------------------------------------------------------------------------
+# Folder of a page: its first path part with a slash, or "(top level)".
+group_awk='function grp(p,  n) { n = index(p, "/"); return n ? substr(p, 1, n) : "(top level)" }'
+
+# by_folder <pages file> <label>: pages grouped by folder (A-Z), oldest first,
+# each folder headed "<folder> <n> of <folder total> <label>".
+by_folder() {
+  awk -F'\t' -v OFS='\t' "$group_awk"'{ print grp($3), $0 }' "$1" |
+    sort -t $'\t' -k1,1 -k2,2n | cut -f2- | rows |
+    awk -F'\t' -v label="$2" "$group_awk"'
+      FILENAME == ARGV[1] { t[grp($3)]++; next }
+      { g = grp($1); c[g]++; line[g, c[g]] = $2; if (!(g in seen)) { seen[g] = 1; order[++ng] = g } }
+      END {
+        for (i = 1; i <= ng; i++) {
+          g = order[i]
+          printf "\n%s %d of %d %s\n", g, c[g], t[g], label
+          for (j = 1; j <= c[g]; j++) print "  " line[g, j]
+        }
+      }' "$tmp/all" -
+}
+
+# The numbers for the whole folder.
+summary() {   # stale cutoff (unix time), stale age in words
+  awk -F'\t' -v now="$now" -v cut="$1" -v agew="$2" -v hasgone="${gone:+1}" "$group_awk"'
+    function pct(a, b) { return b ? int(a * 100 / b + 0.5) "%" : "0%" }
+    function plural(n, w) { return n " " w (n == 1 ? "" : "s") }
+    function age(s,  d) {
+      d = int((now - s) / 86400); if (d < 0) d = 0
+      if (d < 60) return d "d"
+      if (d < 730) return int(d / 30.44) "mo"
+      return sprintf("%.1fy", d / 365.25)
+    }
+    # top <array> <totals or empty> <how many> <title>: biggest counts first, then A-Z.
+    function top(cnt, tot, max, title,  k, best, i, done, shown) {
+      for (k in cnt) any = 1
+      if (!any) return
+      any = 0; print ""; print title
+      split("", done)
+      for (i = 1; i <= max; i++) {
+        best = ""
+        for (k in cnt) if (!(k in done) && (best == "" || cnt[k] > cnt[best] || (cnt[k] == cnt[best] && k < best))) best = k
+        if (best == "") break
+        done[best] = 1
+        if (tot == "") printf "  %4d  %s\n", cnt[best], best
+        else           printf "  %4d of %-4d %4s  %s\n", cnt[best], gt[best], pct(cnt[best], gt[best]), best
+      }
+    }
+    {
+      total++; g = grp($3); gt[g]++
+      d = (now - $1) / 86400
+      if (d < 90) b1++; else if (d < 365) b2++; else if (d < 730) b3++; else b4++
+      if ($1 + 0 < cut + 0) { stale++; gs[g]++; if ($4 != "-") ls[$4]++ }
+      if ($7 == 1) { left++; gl[g]++ }
+      n = split($6, eds, "\036")
+      for (i = 1; i <= n; i++) { split(eds[i], p, "\037"); k = tolower(p[2]); if (!(k in ppl)) { ppl[k] = 1; np++ } }
+      if (oldest == "" || $1 + 0 < oldct + 0) { oldest = $3; oldct = $1; oldd = $2 }
+    }
+    END {
+      for (g in gt) ng++
+      printf "%s in %s, edited by %s.\n", plural(total, "page"), plural(ng, "folder"), (np == 1 ? "1 person" : (np + 0) " people")
+      print ""
+      print "Last edited:"
+      printf "  %-22s %5d  %4s\n", "in the last 3 months", b1, pct(b1, total)
+      printf "  %-22s %5d  %4s\n", "3 to 12 months ago", b2, pct(b2, total)
+      printf "  %-22s %5d  %4s\n", "1 to 2 years ago", b3, pct(b3, total)
+      printf "  %-22s %5d  %4s\n", "over 2 years ago", b4, pct(b4, total)
+      print ""
+      printf "Not edited in %s: %s (%s)\n", agew, plural(stale + 0, "page"), pct(stale, total)
+      if (hasgone) printf "Every editor has left: %s (%s)\n", plural(left + 0, "page"), pct(left, total)
+      printf "Oldest: %s, last edited %s (%s)\n", oldest, oldd, age(oldct)
+      top(gs, "x", 5, "Folders with the most stale pages:")
+      if (hasgone) top(gl, "x", 5, "Folders with the most pages whose editors have all left:")
+      top(ls, "", 5, "Who edited the stale pages last:")
+    }' "$tmp/all"
+}
+
+show_report() {
+  local stale_age=${age:-$report_age} cut total kind=status
+  cut=$(( now - $(age_secs "$stale_age") ))
+  filter "" < "$tmp/pages" > "$tmp/all"
+  total=$(wc -l < "$tmp/all" | tr -d ' ')
+
+  {
+    echo "Docs status: $(basename "$dir"), $(date '+%e %b %Y' | sed 's/^ //')"
+    if [[ -n $search || -n $author ]] || (( only_gone )); then echo "Only pages$(describe "")."; fi
+    if (( total == 0 )); then
+      echo "No pages."
+    else
+      summary "$cut" "$(age_words "$stale_age")"
+      if [[ $mode == R ]]; then
+        awk -F'\t' -v cut="$cut" '$1 + 0 < cut + 0' "$tmp/all" > "$tmp/stale"
+        if [[ -s $tmp/stale ]]; then
+          echo; echo; echo "Not edited in $(age_words "$stale_age"), by folder:"
+          by_folder "$tmp/stale" stale
+        fi
+        awk -F'\t' '$7 == 1' "$tmp/all" > "$tmp/left"
+        if [[ -s $tmp/left ]]; then
+          echo; echo; echo "Every editor has left, by folder:"
+          by_folder "$tmp/left" "with no current editor"
+        fi
+      fi
+    fi
+  } > "$tmp/report"
+
+  cat "$tmp/report"
+  [[ $mode == R ]] && kind=status-full
+  local out=$save stem n
+  if [[ -z $out && -n $report_dir ]]; then
+    mkdir -p "$report_dir" 2>/dev/null || die "Couldn't make the report folder $report_dir."
+    stem="$report_dir/$(basename "$dir")-$kind-$(date +%F)"
+    out="$stem.txt"
+    n=2
+    while [[ -e $out ]]; do out="$stem-$n.txt"; n=$((n + 1)); done
+  fi
+  if [[ -n $out ]]; then
+    cp "$tmp/report" "$out" 2>/dev/null || die "Couldn't save the report to $out."
+    echo "Saved to $out" >&2
+  fi
+  if (( copy )); then
+    if command -v pbcopy >/dev/null && pbcopy < "$tmp/report"; then
+      echo "Copied to the clipboard." >&2
+    else
+      echo "Couldn't copy to the clipboard." >&2
+    fi
+  fi
+}
+
+case $mode in
+  a|n) show_pages ;;
+  u) show_authors ;;
+  r|R) show_report ;;
+esac
+
+if (( asked )); then
+  hint="doc-tool -$mode"
+  [[ -n $search ]] && hint+=" -s $(printf '%q' "$search")"
+  echo "Same thing in one line: $hint $(printf '%q' "$dir")"
+fi
+exit 0
