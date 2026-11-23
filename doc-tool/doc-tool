@@ -300,9 +300,16 @@ rows() {
 header=$(printf '%-6s %-11s %-18s %s' AGE "LAST EDIT" "EDITED BY" PAGE)
 
 # --- Open a page in glow ---------------------------------------------------------------
+# glow shows the page through $PAGER, which is less unless you've set
+# another. With less, its bottom line lists the main keys while you read.
+pager_keys="g top  G bottom  Space/b page  /word search  n next  h help  q back"
 open_page() {
   command -v glow >/dev/null || die "glow isn't installed. Install it with: brew install glow"
-  glow -p "$1" || echo "glow couldn't show $1." >&2
+  local less_opts=${LESS-}
+  case ${PAGER:-less} in
+    less|less\ *|*/less|*/less\ *) less_opts="$less_opts -Ps$pager_keys\$" ;;
+  esac
+  LESS=$less_opts glow -p "$1" || echo "glow couldn't show $1." >&2
 }
 
 # pick_page <rows file> <what the pages are, for the heading>

@@ -23,6 +23,7 @@ cd "$work" || exit 1
 cat > "$fakes/glow" <<'EOF'
 #!/bin/bash
 echo "glow $*" >> "$FAKE_LOG"
+echo "LESS=$LESS PAGER=$PAGER" >> "$FAKE_LOG"
 EOF
 cat > "$fakes/pbcopy" <<'EOF'
 #!/bin/bash
@@ -234,12 +235,14 @@ check '! has "Saved to" && [[ ! -e "$HOME/Desktop/wiki dir-status-$day-3.txt" ]]
 # --- Prompts (need a terminal, so expect) -------------------------------------------------
 if [[ -x /usr/bin/expect ]]; then
   # menu -> oldest first -> search -> open page 1 -> q; paging with -m 3; then the picker with glow missing.
-  out=$(/usr/bin/expect "$here/prompts.exp" "$tool" "$wiki" "$work/empty" 2>&1); code=$?
+  out=$(LESS=-R PAGER=less /usr/bin/expect "$here/prompts.exp" "$tool" "$wiki" "$work/empty" 2>&1); code=$?
   if [[ $code == 0 ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
   echo "=== $r [prompts] exit=$code (want 0)"
   sed 's/^/    /' <<<"$out" | tr -d '\r'
   check 'grep -qF "glow -p $wiki/releases/old notes.md" "$FAKE_LOG"'
   check 'grep -qF "glow -p $wiki/README.md" "$FAKE_LOG"'   # page 2 of -n, opened from the last screen
+  check 'grep -qF "LESS=-R -Psg top  G bottom" "$FAKE_LOG"'   # less shows the keys while reading
+  check 'grep -qF "PAGER=more" "$FAKE_LOG" && grep -qE "^LESS=-R PAGER=more$" "$FAKE_LOG"'   # but not with another pager
 else
   skip=$((skip+1)); echo "=== SKIP [prompts] expect not found"
 fi

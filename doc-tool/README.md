@@ -73,6 +73,23 @@ Pages 1-20 of 120. Number to open, Enter for more, q to quit:
 
 When the output goes to a file or another command, or with `-l`, the first 20 pages are printed, with a note of how many there are in all. `-m 0` prints every page; to scroll through them, use `doc-tool -a -l -m 0 | less`.
 
+## Reading a page
+
+glow shows the page in `less`, and the bottom line lists the main keys while you read:
+
+| Key | What it does |
+| --- | --- |
+| `g` / `G` | Go to the top / bottom |
+| `Space` or `f` / `b` | Page down / up |
+| `d` / `u` | Half a page down / up |
+| `j` / `k`, or the arrow keys | One line down / up |
+| `/word` then Enter | Search for a word; `?word` searches backwards |
+| `n` / `N` | Next / previous match |
+| `h` | Every key `less` has; `q` closes it |
+| `q` | Back to the list |
+
+If you've set `PAGER` to something other than `less`, glow uses that instead, its keys apply, and the bottom line isn't changed.
+
 ## Status reports (`-r` and `-R`)
 
 `-r` gives the numbers for the whole folder:

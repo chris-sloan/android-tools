@@ -38,7 +38,15 @@ expect "Pages 7-8 of 8." { send "\r" } timeout { fail "didn't stay on the page a
 expect "Pages 1-3 of 8." { send "q\r" } timeout { fail "Enter on the last page didn't start again" }
 expect eof
 
-# 3. -a in a terminal goes straight to the picker; glow missing is explained.
+# 3. With a pager other than less, LESS is left alone.
+set env(PAGER) more
+spawn /bin/bash $tool -a $wiki
+expect "Number to open" { send "1\r" } timeout { fail "no picker with PAGER=more" }
+expect "Number to open" { send "q\r" } timeout { fail "no prompt after opening with PAGER=more" }
+expect eof
+set env(PAGER) less
+
+# 4. -a in a terminal goes straight to the picker; glow missing is explained.
 set env(PATH) "$empty:/usr/bin:/bin"
 spawn /bin/bash $tool -a $wiki
 expect "Number to open" { send "1\r" } timeout { fail "no picker" }
