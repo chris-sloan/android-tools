@@ -80,7 +80,15 @@ brew install glow
 
 doc-tool opens pages in glow. Without it, doc-tool still lists pages, authors and reports; only opening a page needs glow.
 
-### 4. Install the tools
+### 4. fzf (optional)
+
+```bash
+brew install fzf
+```
+
+With fzf on your PATH, every picker in these tools (choosing a device, a video, an action or a page) lets you type to filter and use the arrow keys, and some show a preview. Without it, the same pickers are the numbered menus. A picker uses fzf only when it is running in a terminal; piped input always gets the numbered menu. To use the numbered menus even with fzf installed, set `ANDROID_TOOLS_NO_FZF=1`.
+
+### 5. Install the tools
 
 ```bash
 ./install.sh
@@ -100,7 +108,7 @@ outdir=~/Pictures/shots
 copy=0
 ```
 
-### 5. Device
+### 6. Device
 
 Turn on **Developer options** (tap **Settings → About phone → Build number** 7 times), then **USB debugging**. Plug the phone in and accept the prompt. Check with `adb devices`.
 

@@ -240,6 +240,26 @@ report() {
 
 if (( info )); then report; exit 0; fi
 
+# --- fzf pickers ---------------------------------------------------------------
+# With fzf installed and a terminal on standard input and standard error, a
+# picker uses fzf. Otherwise it is the numbered select menu. Setting
+# ANDROID_TOOLS_NO_FZF to anything non-empty turns fzf off.
+use_fzf() {
+  [[ -z ${ANDROID_TOOLS_NO_FZF:-} && -t 0 && -t 2 ]] && command -v fzf >/dev/null
+}
+
+# fzf_pick <prompt> <header> [preview command]
+# Reads lines of "label" or "label<TAB>extra" on standard input. Sets $picked to
+# the chosen line's position, counting from 1. Only the label is shown; extra is
+# for the preview command ({3..}). Returns 1 if the user cancels.
+fzf_pick() {
+  local tab=$'\t' line args
+  args=(--height=40% --reverse --delimiter="$tab" --with-nth=2 --prompt="$1> " --header="$2")
+  [[ -z ${3:-} ]] || args+=(--preview="$3" --preview-window=wrap)
+  line=$(awk '{ print NR "\t" $0 }' | fzf "${args[@]}") || return 1
+  picked=${line%%"$tab"*}
+}
+
 # --- Pick a file -----------------------------------------------------------------
 asked=0   # 1 once anything was chosen from a prompt; prints the one-line command at the end
 
@@ -263,6 +283,19 @@ pick_file() {
     p="$indir/$f"
     labels+=("$f  ($(fmt_mb "$(file_bytes "$p")"), $(stat -f '%Sm' -t '%d %b %H:%M' "$p" 2>/dev/null || true))")
   done
+  if use_fzf; then
+    # The preview shows the length and streams, read from ffmpeg's own banner.
+    local preview='ffmpeg -nostdin -hide_banner -i {3..} 2>&1 | grep -E "Duration|Stream"'
+    local i
+    # A tab in a name would break the fields, so the label shows it as a space.
+    fzf_pick "Video" "Pick a video from $indir (newest first)" "$preview" < <(
+      for (( i = 0; i < ${#names[@]}; i++ )); do
+        printf '%s\t%s/%s\n' "${labels[i]//$'\t'/ }" "$indir" "${names[i]}"
+      done
+    ) || die "No video chosen."
+    file="$indir/${names[picked-1]}"
+    return 0
+  fi
   echo "Pick a video from $indir (newest first):"
   PS3="> "
   select _ in "${labels[@]}"; do
@@ -389,12 +422,15 @@ ask_trim() {   # $1 = prompt
 }
 
 # --- Choose what to do ---------------------------------------------------------------
-menu_line() {   # number, text, why-not
-  if [[ -n $3 ]]; then
-    printf '  %s) %s  (not available: %s)\n' "$1" "$2" "$3"
+menu_text() {   # text, why-not
+  if [[ -n $2 ]]; then
+    printf '%s  (not available: %s)' "$1" "$2"
   else
-    printf '  %s) %s\n' "$1" "$2"
+    printf '%s' "$1"
   fi
+}
+menu_line() {   # number, text, why-not
+  printf '  %s) %s\n' "$1" "$(menu_text "$2" "$3")"
 }
 
 if [[ -z $mode ]]; then
@@ -405,14 +441,22 @@ if [[ -z $mode ]]; then
     asked=1
     echo
     echo "$base: $(fmt_mb "$in_bytes")${duration:+, $(fmt_time "$duration") long}${in_w:+, ${in_w}x${in_h}}"
-    echo "What do you want to do?"
-    menu_line 1 "It plays in slow motion: fix it" "$why_f"
-    menu_line 2 "Make a small WebM to share (no audio)" "$why_w"
-    menu_line 3 "Compress to MP4 (keeps audio)" "$why_c"
-    menu_line 4 "Get it under a size limit, as MP4" "$why_c"
+    actions=("It plays in slow motion: fix it" "Make a small WebM to share (no audio)" "Compress to MP4 (keeps audio)" "Get it under a size limit, as MP4")
+    whys=("$why_f" "$why_w" "$why_c" "$why_c")
+    if ! use_fzf; then
+      echo "What do you want to do?"
+      for i in 0 1 2 3; do menu_line $((i + 1)) "${actions[i]}" "${whys[i]}"; done
+    fi
     want_size=0
     while :; do
-      read -r -p "> " choice || exit 1
+      if use_fzf; then
+        fzf_pick "Action" "What do you want to do?" < <(
+          for i in 0 1 2 3; do menu_text "${actions[i]}" "${whys[i]}"; echo; done
+        ) || die "Nothing chosen; stopping."
+        choice=$picked
+      else
+        read -r -p "> " choice || exit 1
+      fi
       case $choice in
         1) pick=f why=$why_f ;;
         2) pick=w why=$why_w ;;
@@ -548,11 +592,23 @@ if [[ -n $size_mb ]]; then
     fi
     asked=1
     echo
-    [[ -n $cand ]] && echo "  1) Scale down to ${cand}px wide (whole frame kept; small text gets softer)"
-    echo "  2) Trim to a shorter part"
-    echo "  3) Encode anyway"
-    echo "  4) Cancel"
-    read -r -p "> " choice || exit 1
+    if use_fzf; then
+      # Same four answers as the numbered menu; "1" is left out when there is no width to offer.
+      codes=() labs=()
+      if [[ -n $cand ]]; then
+        codes+=(1); labs+=("Scale down to ${cand}px wide (whole frame kept; small text gets softer)")
+      fi
+      codes+=(2 3 4); labs+=("Trim to a shorter part" "Encode anyway" "Cancel")
+      fzf_pick "Next" "What now?" < <(printf '%s\n' "${labs[@]}") \
+        || { echo "Cancelled; nothing was saved."; exit 1; }
+      choice=${codes[picked-1]}
+    else
+      [[ -n $cand ]] && echo "  1) Scale down to ${cand}px wide (whole frame kept; small text gets softer)"
+      echo "  2) Trim to a shorter part"
+      echo "  3) Encode anyway"
+      echo "  4) Cancel"
+      read -r -p "> " choice || exit 1
+    fi
     case $choice in
       1) if [[ -n $cand ]]; then maxw=$cand eff_maxw=$cand; else echo "Enter 2, 3 or 4."; fi ;;
       2) ask_trim "Keep which part? start-end, e.g. 0:15-1:05 (Enter to go back): " || true ;;

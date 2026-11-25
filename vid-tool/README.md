@@ -67,6 +67,7 @@ vid-tool -i                        # what can this ffmpeg do?
 
 1. **Checks your ffmpeg.** It reads the encoder list from `ffmpeg -encoders` and works out which modes this build supports. See [What your ffmpeg can do](#what-your-ffmpeg-can-do).
 2. **Picks a file.** Given a file, it uses it. Given none, it lists up to 15 videos (`mp4`, `mov`, `webm`, `m4v`, `mkv`) from `~/Desktop`, newest first, with size and date.
+   With [fzf](../README.md#4-fzf-optional) installed, this list and the menus below are fzf pickers: type to filter, arrow keys to move, Enter to choose, Esc to cancel. The video list shows the length and streams of the highlighted file beside it. Without fzf you get numbered menus. Set `ANDROID_TOOLS_NO_FZF=1` to keep the numbered menus even with fzf installed. fzf is only used in a terminal.
 3. **Reads the video's details** (length, picture size, audio) from `ffmpeg -i`. It does not need `ffprobe`.
 4. **Asks what to do** if you gave no mode. Modes this ffmpeg can't do are marked with the reason.
 5. **Checks the trim range** against the video's length before encoding anything.
@@ -226,7 +227,7 @@ webm_maxw=480
 vid-tool/tests/run
 ```
 
-Needs `ffmpeg`, and `expect` for the menu and prompt tests (macOS ships it). It makes its own test clips in a temp folder, runs every mode and failure case, and deletes the folder when done. Missing encoders are simulated with a fake `ffmpeg` that hides them from the encoder list. It takes about two minutes and exits non-zero if anything fails.
+Needs `ffmpeg`, and `expect` for the menu and prompt tests (macOS ships it). fzf is not needed, and a real fzf is never used: the numbered-menu tests set `ANDROID_TOOLS_NO_FZF=1`, and the fzf tests use a fake `fzf` from `tests/fakes`. It makes its own test clips in a temp folder, runs every mode and failure case, and deletes the folder when done. Missing encoders are simulated with a fake `ffmpeg` that hides them from the encoder list. It takes about two minutes and exits non-zero if anything fails.
 
 These tests are provisional. They were written alongside the tool, before the repo had a testing convention, and will be reworked once one is agreed.
 

@@ -69,6 +69,8 @@ Pages 1-20 of 120. Number to open, Enter for more, q to quit:
 - **b** goes back 20.
 - **q** quits.
 
+With [fzf](../README.md#4-fzf-optional) installed, the menu and the page list are fzf pickers instead: type to filter the pages, arrow keys to move, Enter to open one in glow, and a preview shows the start of the highlighted page. All the pages are in the list, so `-m` does nothing there. Opening a page and quitting glow brings you back to the list; Esc leaves it, like `q`. Esc at the menu stops doc-tool. fzf is only used in a terminal, and `ANDROID_TOOLS_NO_FZF=1` keeps the numbered lists.
+
 `-m 50` shows 50 at a time and `-m 0` shows them all at once. To change the usual number, set `page_limit` in the [config file](#config-file). `-s`, `-b` and `-O` narrow a big wiki down.
 
 When the output goes to a file or another command, or with `-l`, the first 20 pages are printed, with a note of how many there are in all. `-m 0` prints every page; to scroll through them, use `doc-tool -a -l -m 0 | less`.
@@ -220,4 +222,4 @@ ignore_re="^chore|reformat"
 doc-tool/tests/run
 ```
 
-Builds small wiki repos with back-dated commits in a temp folder. Needs git; the prompt tests use `expect`, which ships with macOS.
+Builds small wiki repos with back-dated commits in a temp folder. Needs git; the prompt tests use `expect`, which ships with macOS. fzf is not needed, and a real fzf is never used: the numbered-menu tests set `ANDROID_TOOLS_NO_FZF=1`, and the fzf tests use a fake `fzf` from `tests/fakes`.

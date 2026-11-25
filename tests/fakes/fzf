@@ -1,0 +1,42 @@
+#!/bin/bash
+# Fake fzf shared by the tool tests. Put this folder first on PATH.
+# It logs how it was called and what it was offered, then "chooses" a line. It
+# draws nothing and reads no keys, so it never needs a terminal.
+#
+# What it does is written by hand from how the tools call fzf: lines on
+# standard input, the chosen line printed on standard output, exit 130 when the
+# user presses Esc or Ctrl+C, exit 1 when nothing matched. It was not checked
+# against a real fzf here.
+#
+# Settings, all optional (set them in the environment):
+#   FAKE_FZF_LOG    file that gets one "fzf <arguments>" line per call, then one
+#                   "  in: <line>" per line offered (default: no log)
+#   FAKE_FZF_SEQ    what each call does, in order, separated by spaces: a number
+#                   picks that input line (counting from 1), "esc" exits 130,
+#                   "none" exits 1. Default "1". When the list runs out, calls
+#                   exit 130, as if the user pressed Esc.
+#   FAKE_FZF_COUNT  file that counts the calls so far (default: fzf.count in
+#                   FAKE_STATE, or /tmp). Delete it to start the sequence again.
+log=${FAKE_FZF_LOG:-/dev/null}
+count_file=${FAKE_FZF_COUNT:-${FAKE_STATE:-/tmp}/fzf.count}
+
+n=0
+[[ -f $count_file ]] && n=$(cat "$count_file")
+n=$((n + 1))
+echo "$n" > "$count_file"
+
+lines=()
+while IFS= read -r l; do lines+=("$l"); done
+{
+  echo "fzf $*"
+  for l in "${lines[@]}"; do echo "  in: $l"; done
+} >> "$log"
+
+seq=(${FAKE_FZF_SEQ-1})
+what=${seq[n-1]:-esc}
+case $what in
+  esc) exit 130 ;;
+  none) exit 1 ;;
+  *) printf '%s\n' "${lines[what-1]}" ;;
+esac
+exit 0

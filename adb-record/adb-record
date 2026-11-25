@@ -100,6 +100,26 @@ fi
 
 command -v adb >/dev/null || { echo "adb not found on PATH." >&2; exit 1; }
 
+# --- fzf pickers ---------------------------------------------------------------
+# With fzf installed and a terminal on standard input and standard error, a
+# picker uses fzf. Otherwise it is the numbered select menu. Setting
+# ANDROID_TOOLS_NO_FZF to anything non-empty turns fzf off.
+use_fzf() {
+  [[ -z ${ANDROID_TOOLS_NO_FZF:-} && -t 0 && -t 2 ]] && command -v fzf >/dev/null
+}
+
+# fzf_pick <prompt> <header> [preview command]
+# Reads lines of "label" or "label<TAB>extra" on standard input. Sets $picked to
+# the chosen line's position, counting from 1. Only the label is shown; extra is
+# for the preview command ({3..}). Returns 1 if the user cancels.
+fzf_pick() {
+  local tab=$'\t' line args
+  args=(--height=40% --reverse --delimiter="$tab" --with-nth=2 --prompt="$1> " --header="$2")
+  [[ -z ${3:-} ]] || args+=(--preview="$3" --preview-window=wrap)
+  line=$(awk '{ print NR "\t" $0 }' | fzf "${args[@]}") || return 1
+  picked=${line%%"$tab"*}
+}
+
 # --- Pick a device -----------------------------------------------------------
 serials=()
 while read -r s state _; do
@@ -116,14 +136,23 @@ elif (( ${#serials[@]} == 1 )); then
 else
   labels=()
   for s in "${serials[@]}"; do labels+=("$(model_of "$s")  [$s]"); done
-  echo "Select a device:"
-  PS3="> "
-  select _ in "${labels[@]}"; do
-    if [[ $REPLY =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= ${#serials[@]} )); then
-      serial=${serials[REPLY-1]}
-      break
+  if use_fzf; then
+    if fzf_pick "Device" "Select a device" < <(printf '%s\n' "${labels[@]}"); then
+      serial=${serials[picked-1]}
+    else
+      echo "No device selected." >&2
+      exit 1
     fi
-  done
+  else
+    echo "Select a device:"
+    PS3="> "
+    select _ in "${labels[@]}"; do
+      if [[ $REPLY =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= ${#serials[@]} )); then
+        serial=${serials[REPLY-1]}
+        break
+      fi
+    done
+  fi
   [[ -n $serial ]] || exit 1
 fi
 

@@ -208,23 +208,50 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 now=$(date +%s)
 
+# --- fzf pickers ---------------------------------------------------------------
+# With fzf installed and a terminal on standard input and standard error, a
+# picker uses fzf. Otherwise it is the numbered select menu. Setting
+# ANDROID_TOOLS_NO_FZF to anything non-empty turns fzf off.
+use_fzf() {
+  [[ -z ${ANDROID_TOOLS_NO_FZF:-} && -t 0 && -t 2 ]] && command -v fzf >/dev/null
+}
+
+# fzf_pick <prompt> <header> [preview command]
+# Reads lines of "label" or "label<TAB>extra" on standard input. Sets $picked to
+# the chosen line's position, counting from 1. Only the label is shown; extra is
+# for the preview command ({3..}). Returns 1 if the user cancels.
+fzf_pick() {
+  local tab=$'\t' line args
+  args=(--height=40% --reverse --delimiter="$tab" --with-nth=2 --prompt="$1> " --header="$2")
+  [[ -z ${3:-} ]] || args+=(--preview="$3" --preview-window=wrap)
+  line=$(awk '{ print NR "\t" $0 }' | fzf "${args[@]}") || return 1
+  picked=${line%%"$tab"*}
+}
+
 # --- Menu ------------------------------------------------------------------------
 asked=0   # 1 once anything was chosen from a prompt; prints the one-line command at the end
 
 if [[ -z $mode ]]; then
   if (( interactive )); then
-    echo "What would you like to see in $dir?"
-    PS3="> "
     choices=("Pages, oldest first" "Pages, newest first" "Who edits these pages" "Status summary" "Full status report")
-    select _ in "${choices[@]}"; do
-      case $REPLY in
-        1) mode=a; break ;;
-        2) mode=n; break ;;
-        3) mode=u; break ;;
-        4) mode=r; break ;;
-        5) mode=R; break ;;
-      esac
-    done
+    if use_fzf; then
+      fzf_pick "Show" "What would you like to see in $dir?" < <(printf '%s\n' "${choices[@]}") \
+        || die "Nothing chosen; stopping."
+      modes=(a n u r R)
+      mode=${modes[picked-1]}
+    else
+      echo "What would you like to see in $dir?"
+      PS3="> "
+      select _ in "${choices[@]}"; do
+        case $REPLY in
+          1) mode=a; break ;;
+          2) mode=n; break ;;
+          3) mode=u; break ;;
+          4) mode=r; break ;;
+          5) mode=R; break ;;
+        esac
+      done
+    fi
     [[ -n $mode ]] || exit 1
     if [[ -z $search ]]; then
       read -r -p "Only pages containing (Enter for all): " search || true
@@ -397,6 +424,19 @@ pick_page() {
     paths+=("$p"); labels+=("$l")
   done < "$1"
   total=${#paths[@]}
+  if use_fzf; then
+    # fzf scrolls and filters the whole list, so the page limit (-m) isn't used.
+    # Opening a page comes back to the list; Esc ends it, like q.
+    while :; do
+      fzf_pick "Page" "$2"$'\n'"  $header" "head -n 60 {3..}" < <(
+        for (( i = 0; i < total; i++ )); do
+          printf '%s\t%s/%s\n' "${labels[i]}" "$dir" "${paths[i]}"
+        done
+      ) || break
+      open_page "$dir/${paths[picked-1]}"
+    done
+    return 0
+  fi
   size=$limit
   (( size > 0 && size < total )) || size=$total
   w=${#total}

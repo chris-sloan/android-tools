@@ -15,6 +15,15 @@
 # which runs bash -n and shellcheck on this script. This script does not lint
 # itself, so it needs nothing installed.
 #
+# The device picker uses fzf when fzf is on PATH and standard input and error
+# are terminals. This script hides fzf from every other check by setting
+# ANDROID_TOOLS_NO_FZF=1 (the tool's documented switch), and the fzf checks
+# turn it back on. Those checks need a terminal, so they run the tool through
+# tests/tty.exp (expect, which ships with macOS), with a fake fzf (tests/fakes/fzf)
+# first on PATH. A real fzf on the machine is never used. Without expect those
+# checks print a SKIP line. Piped input is checked too: it keeps the select menu
+# even with fzf on PATH.
+#
 # Not tested: stopping with Ctrl+C. The tool traps INT, but a test that starts
 # the tool as a background job has INT ignored, and a terminal needs expect.
 # Stopping with Enter covers the same stop_recording path.
@@ -34,20 +43,36 @@ export PATH="$shared:$PATH"
 export XDG_CONFIG_HOME="$work/config"
 conf="$XDG_CONFIG_HOME/android-tools/adb-record.conf"
 
+export ANDROID_TOOLS_NO_FZF=1 FAKE_FZF_LOG="$work/fzf.log"
+
 # --- Helpers ----------------------------------------------------------------------
-pass=0; fail=0
+pass=0; fail=0; skip=0
 out=""
 # run <label> <expected exit code> <command...>
 # Standard input is INPUT (printf %b), sent after DELAY seconds if set. With
 # neither set, the command sees an empty, closed input.
 run() {
   local label=$1 want=$2 code r; shift 2
-  : > "$FAKE_LOG"; rm -f "$work/rec.pid" "$work/rec.events"
+  : > "$FAKE_LOG"; : > "$FAKE_FZF_LOG"; rm -f "$work/rec.pid" "$work/rec.events" "$work/fzf.count"
   out=$( { [[ -n $DELAY ]] && sleep "$DELAY"; printf '%b' "$INPUT"; } | "$@" 2>&1 ); code=$?
   if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
   echo "=== $r [$label] exit=$code (want $want)"
   sed 's/^/    /' <<<"$out"
 }
+# trun <label> <expected exit code> <command...>: like run, but the command has
+# a terminal on standard input, output and error (through expect). A command
+# of T means the tool, since expect can't run a shell function.
+trun() {
+  local label=$1 want=$2 code r; shift 2
+  if [[ $1 == T ]]; then shift; set -- /bin/bash "$tool" "$@"; fi
+  : > "$FAKE_LOG"; : > "$FAKE_FZF_LOG"; rm -f "$work/rec.pid" "$work/rec.events" "$work/fzf.count"
+  out=$(/usr/bin/expect "$here/../../tests/tty.exp" "$@" 2>&1 </dev/null); code=$?
+  out=${out//$'\r'/}
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  sed 's/^/    /' <<<"$out"
+}
+fzf_logged() { grep -qF -- "$1" "$FAKE_FZF_LOG"; }
 check() {
   if eval "$1"; then pass=$((pass+1)); echo "    PASS $1"; else fail=$((fail+1)); echo "    FAIL $1"; fi
 }
@@ -55,6 +80,8 @@ has() { grep -qF -- "$1" <<<"$out"; }
 logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 T() { /bin/bash "$tool" "$@"; }
 two=$'SERIALAAA\tdevice\nSERIALBBB\tdevice\n'
+# shellcheck disable=SC2034  # used inside the single-quoted strings that check evaluates
+tab=$'\t'
 
 # --- Help and errors ----------------------------------------------------------------
 run "help" 0 T -h;                                       check 'has "Usage: adb-record"'
@@ -158,10 +185,39 @@ run "-h shows the config path" 0 T -h;                   check 'has "Config file
 rm -f "$conf"
 XDG_CONFIG_HOME='' run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/adb-record.conf"'
 
+# --- Device picker with fzf ----------------------------------------------------------------
+# Piped input keeps the select menu even with fzf on PATH and fzf switched on.
+ANDROID_TOOLS_NO_FZF= INPUT='2\n' FAKE_ADB_DEVICES=$two run "piped input: select menu, not fzf" 0 T -T -o vids piped
+check 'has "Select a device:" && logged "adb -s SERIALBBB shell screenrecord" && [[ ! -s $FAKE_FZF_LOG ]]'
+if command -v expect >/dev/null; then
+  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=2 FAKE_ADB_DEVICES=$two trun "terminal and fzf: fzf picks device 2" 0 T -T -o vids fz
+  check 'logged "adb -s SERIALBBB shell screenrecord" && ! has "Select a device:"'
+  check 'fzf_logged "  in: 1${tab}Pixel 9 Pro  [SERIALAAA]" && fzf_logged "  in: 2${tab}Pixel 9 Pro  [SERIALBBB]"'
+  check 'fzf_logged "--with-nth=2" && fzf_logged "--prompt=Device> " && fzf_logged "--header=Select a device" && fzf_logged "--height=40%"'
+  check '(( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 1 ))'
+  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=1 FAKE_ADB_DEVICES=$two trun "fzf picks device 1" 0 T -T -o vids fz1
+  check 'logged "adb -s SERIALAAA shell screenrecord"'
+  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=esc FAKE_ADB_DEVICES=$two trun "fzf: Esc exits" 1 T -T -o vids fzesc
+  check 'has "No device selected." && ! logged "screenrecord"'
+  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=none FAKE_ADB_DEVICES=$two trun "fzf: no match exits" 1 T -T -o vids fznone
+  check 'has "No device selected." && ! logged "screenrecord"'
+  ANDROID_TOOLS_NO_FZF= trun "fzf: one device needs no picker" 0 T -T -o vids fzone
+  check '[[ ! -s $FAKE_FZF_LOG ]] && logged "adb -s emulator-5554 shell screenrecord"'
+  # Standard error is not the terminal here, so fzf is not used. The select menu
+  # (which draws on standard error) is answered blind.
+  ANDROID_TOOLS_NO_FZF= TTY_BLIND=1 TTY_REPLY=2 FAKE_ADB_DEVICES=$two trun "stderr not a terminal: select menu, not fzf" 0 /bin/bash -c 'exec /bin/bash "$0" "$@" 2>/dev/null' "$tool" -T -o vids noterr
+  check 'logged "adb -s SERIALBBB shell screenrecord" && [[ ! -s $FAKE_FZF_LOG ]]'
+  ANDROID_TOOLS_NO_FZF=1 TTY_PROMPT='> ' TTY_REPLY=2 FAKE_ADB_DEVICES=$two trun "ANDROID_TOOLS_NO_FZF keeps select on a terminal" 0 T -T -o vids nofzf
+  check 'has "Select a device:" && logged "adb -s SERIALBBB shell screenrecord" && [[ ! -s $FAKE_FZF_LOG ]]'
+else
+  skip=$((skip+1)); echo "=== SKIP [fzf picker on a terminal] expect not found"
+fi
+
 # --- Lint -------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"
 run "bash -n (this script)" 0 bash -n "$here/run"   # not $0: it may be relative, and we cd'd away
 
 echo
-echo "$pass passed, $fail failed, 0 skipped."
+echo "$pass passed, $fail failed, $skip skipped."
+if [[ -n ${CI:-} ]] && (( skip > 0 )); then exit 1; fi
 (( fail == 0 ))
