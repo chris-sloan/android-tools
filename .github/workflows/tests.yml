@@ -66,8 +66,12 @@ jobs:
 
       - name: Install test dependencies
         shell: bash
+        # Passed through env, not ${{ }} in the script, so a folder name
+        # can't inject shell.
+        env:
+          TOOL_DIR: ${{ matrix.dir }}
         run: |
-          brewfile="${{ matrix.dir }}/tests/Brewfile"
+          brewfile="$TOOL_DIR/tests/Brewfile"
           if [ -f "$brewfile" ]; then
             brew bundle --file="$brewfile"
           else
@@ -82,9 +86,10 @@ jobs:
           # failure (docs/testing.md, "Dependencies"). Set explicitly so the
           # rule does not depend on that default.
           CI: "1"
+          TOOL_DIR: ${{ matrix.dir }}
         run: |
           set -o pipefail
-          "${{ matrix.dir }}/tests/run" 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+          "$TOOL_DIR/tests/run" 2>&1 | tee "$RUNNER_TEMP/test-output.log"
 
       - name: Report failure in the job summary
         if: failure() && steps.tests.outcome == 'failure'
