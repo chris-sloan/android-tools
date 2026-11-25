@@ -1,0 +1,124 @@
+name: tests
+
+# Runs every tool's tests. See docs/testing.md, section "CI".
+# A new tool is picked up with no change here: the list job finds every
+# */tests/run. No path filters, so every change runs everything.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  list:
+    runs-on: macos-26
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+      has_tests: ${{ steps.find.outputs.has_tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find every tests/run
+        id: find
+        shell: bash
+        run: |
+          set -eu
+          # One entry per tool: {"name": "<tool>", "dir": "<tool>"}.
+          # The top-level tests/run is one more entry, named "repo-wide".
+          entries=""
+          for f in */tests/run; do
+            [ -f "$f" ] || continue
+            tool=${f%%/*}
+            entries="$entries$tool"$'\n'
+          done
+          entries=$(printf '%s' "$entries" | sort)
+          json='[]'
+          if [ -n "$entries" ]; then
+            json=$(printf '%s\n' "$entries" | jq -R '{name: ., dir: .}' | jq -s -c '.')
+          fi
+          if [ -f tests/run ]; then
+            json=$(printf '%s' "$json" | jq -c '. + [{name: "repo-wide", dir: "."}]')
+          fi
+          count=$(printf '%s' "$json" | jq 'length')
+          echo "Found $count test suite(s): $json"
+          {
+            echo "matrix={\"include\":$json}"
+            if [ "$count" -gt 0 ]; then echo "has_tests=true"; else echo "has_tests=false"; fi
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: list
+    # An empty matrix is an error in Actions, so skip the job when nothing was found.
+    if: needs.list.outputs.has_tests == 'true'
+    name: test (${{ matrix.name }})
+    runs-on: macos-26
+    # Only this job comments on pull requests.
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.list.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          brewfile="${{ matrix.dir }}/tests/Brewfile"
+          if [ -f "$brewfile" ]; then
+            brew bundle --file="$brewfile"
+          else
+            echo "No $brewfile, nothing to install."
+          fi
+
+      - name: Run tests
+        id: tests
+        shell: bash
+        env:
+          # Actions already sets CI=true. A set CI makes a SKIP count as a
+          # failure (docs/testing.md, "Dependencies"). Set explicitly so the
+          # rule does not depend on that default.
+          CI: "1"
+        run: |
+          set -o pipefail
+          "${{ matrix.dir }}/tests/run" 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+
+      - name: Report failure in the job summary
+        if: failure() && steps.tests.outcome == 'failure'
+        shell: bash
+        env:
+          TOOL: ${{ matrix.name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          log="$RUNNER_TEMP/test-output.log"
+          report="$RUNNER_TEMP/report.md"
+          {
+            echo "### Tests failed: $TOOL"
+            echo
+            if grep -E '(^|[[:space:]=])(FAIL|SKIP)([[:space:]]|$)' "$log" > "$RUNNER_TEMP/lines.txt"; then
+              echo '```'
+              cat "$RUNNER_TEMP/lines.txt"
+              echo '```'
+            else
+              echo "No FAIL or SKIP lines in the output. The tests may have stopped early."
+            fi
+            echo
+            echo "Full log: $RUN_URL"
+          } > "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: failure() && steps.tests.outcome == 'failure' && github.event_name == 'pull_request'
+        # A pull request from a fork gets a read-only token and this step
+        # fails. The summary above still has the text, and the job still
+        # ends failed because the tests step failed.
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/report.md"
