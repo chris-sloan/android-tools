@@ -286,7 +286,7 @@ fi
 # --- Lint ---------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"
 if command -v shellcheck >/dev/null; then
-  run "shellcheck" 0 shellcheck -S warning "$tool" "$0"
+  run "shellcheck" 0 shellcheck -S warning "$tool" "$here/run"   # not $0: it may be relative, and we cd'd away
 else
   skip=$((skip+1)); echo "=== SKIP [shellcheck] not installed (brew bundle --file=doc-tool/tests/Brewfile)"
 fi
