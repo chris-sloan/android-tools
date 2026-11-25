@@ -288,7 +288,7 @@ run "bash -n" 0 bash -n "$tool"
 if command -v shellcheck >/dev/null; then
   run "shellcheck" 0 shellcheck -S warning "$tool" "$0"
 else
-  skip=$((skip+1)); echo "=== SKIP [shellcheck] not installed (brew install shellcheck)"
+  skip=$((skip+1)); echo "=== SKIP [shellcheck] not installed (brew bundle --file=doc-tool/tests/Brewfile)"
 fi
 
 echo
