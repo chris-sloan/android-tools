@@ -138,27 +138,27 @@ check 'logged "adb -s SERIALAAA exec-out"'
 
 # --- Device picker with fzf ----------------------------------------------------------------
 # Piped input keeps the select menu even with fzf on PATH and fzf switched on.
-ANDROID_TOOLS_NO_FZF= INPUT='2\n' FAKE_ADB_DEVICES=$two run "piped input: select menu, not fzf" 0 T -C -o out piped
+ANDROID_TOOLS_NO_FZF='' INPUT='2\n' FAKE_ADB_DEVICES=$two run "piped input: select menu, not fzf" 0 T -C -o out piped
 check 'has "Select a device:" && logged "adb -s SERIALBBB exec-out" && [[ ! -s $FAKE_FZF_LOG ]]'
 if command -v expect >/dev/null; then
-  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=2 FAKE_ADB_DEVICES=$two trun "terminal and fzf: fzf picks device 2" 0 T -C -o out fz
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=2 FAKE_ADB_DEVICES=$two trun "terminal and fzf: fzf picks device 2" 0 T -C -o out fz
   check 'logged "adb -s SERIALBBB exec-out" && ! has "Select a device:" && [[ -f out/fz.png ]]'
   check 'fzf_logged "  in: 1${tab}Pixel 9 Pro  [SERIALAAA]" && fzf_logged "  in: 2${tab}Pixel 9 Pro  [SERIALBBB]"'
   check 'fzf_logged "--with-nth=2" && fzf_logged "--prompt=Device> " && fzf_logged "--header=Select a device" && fzf_logged "--height=40%"'
   check '(( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 1 ))'
-  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=1 FAKE_ADB_DEVICES=$two trun "fzf picks device 1" 0 T -C -o out fz1
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=1 FAKE_ADB_DEVICES=$two trun "fzf picks device 1" 0 T -C -o out fz1
   check 'logged "adb -s SERIALAAA exec-out"'
-  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=esc FAKE_ADB_DEVICES=$two trun "fzf: Esc exits" 1 T -C -o out fzesc
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=esc FAKE_ADB_DEVICES=$two trun "fzf: Esc exits" 1 T -C -o out fzesc
   check 'has "No device selected." && ! logged "screencap" && [[ ! -e out/fzesc.png ]]'
-  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=none FAKE_ADB_DEVICES=$two trun "fzf: no match exits" 1 T -C -o out fznone
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=none FAKE_ADB_DEVICES=$two trun "fzf: no match exits" 1 T -C -o out fznone
   check 'has "No device selected." && ! logged "screencap"'
-  ANDROID_TOOLS_NO_FZF= FAKE_FZF_SEQ=2 FAKE_ADB_DEVICES=$two trun "fzf: -L uses the picked device" 0 T -L
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=2 FAKE_ADB_DEVICES=$two trun "fzf: -L uses the picked device" 0 T -L
   check 'logged "adb -s SERIALBBB shell dumpsys SurfaceFlinger --display-id"'
-  ANDROID_TOOLS_NO_FZF= trun "fzf: one device needs no picker" 0 T -C -o out fzone
+  ANDROID_TOOLS_NO_FZF='' trun "fzf: one device needs no picker" 0 T -C -o out fzone
   check '[[ ! -s $FAKE_FZF_LOG ]] && logged "adb -s emulator-5554 exec-out"'
   # Standard error is not the terminal here, so fzf is not used. The select menu
   # (which draws on standard error) is answered blind.
-  ANDROID_TOOLS_NO_FZF= TTY_BLIND=1 TTY_REPLY=2 FAKE_ADB_DEVICES=$two trun "stderr not a terminal: select menu, not fzf" 0 /bin/bash -c 'exec /bin/bash "$0" "$@" 2>/dev/null' "$tool" -C -o out noterr
+  ANDROID_TOOLS_NO_FZF='' TTY_BLIND=1 TTY_REPLY=2 FAKE_ADB_DEVICES=$two trun "stderr not a terminal: select menu, not fzf" 0 /bin/bash -c 'exec /bin/bash "$0" "$@" 2>/dev/null' "$tool" -C -o out noterr
   check 'logged "adb -s SERIALBBB exec-out" && [[ ! -s $FAKE_FZF_LOG ]]'
   ANDROID_TOOLS_NO_FZF=1 TTY_PROMPT='> ' TTY_REPLY=2 FAKE_ADB_DEVICES=$two trun "ANDROID_TOOLS_NO_FZF keeps select on a terminal" 0 T -C -o out nofzf
   check 'has "Select a device:" && logged "adb -s SERIALBBB exec-out" && [[ ! -s $FAKE_FZF_LOG ]]'
