@@ -189,7 +189,7 @@ run "empty indir" 1 T -i;                                check 'has "indir can'"
 setconf 'mp4_crf=35'
 run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf"'
 rm -f "$conf"
-XDG_CONFIG_HOME= HOME=$work/home run "-h without XDG_CONFIG_HOME" 0 T -h
+XDG_CONFIG_HOME='' HOME=$work/home run "-h without XDG_CONFIG_HOME" 0 T -h
 check 'has "Config file: $work/home/.config/android-tools/vid-tool.conf"'
 
 # --- Menus and prompts (through a real terminal) ------------------------------------------

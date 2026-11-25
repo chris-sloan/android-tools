@@ -309,7 +309,7 @@ run "bad pattern" 1 T -a "$wiki";                        check 'has "$conf, line
 setconf 'page_limit=5'
 run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf" && has "5; 0 shows them all"'
 rm -f "$conf"
-XDG_CONFIG_HOME= run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/doc-tool.conf"'
+XDG_CONFIG_HOME='' run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/doc-tool.conf"'
 
 # --- Prompts (need a terminal, so expect) -------------------------------------------------
 if [[ -x /usr/bin/expect ]]; then

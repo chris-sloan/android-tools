@@ -158,7 +158,7 @@ run "empty outdir" 1 T -o out x;                         check 'has "outdir can'
 setconf 'delay=2'
 run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf" && has "(default 2)"'
 rm -f "$conf"
-XDG_CONFIG_HOME= run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/adb-shot.conf"'
+XDG_CONFIG_HOME='' run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/adb-shot.conf"'
 
 # --- Lint -------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"
