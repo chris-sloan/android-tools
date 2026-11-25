@@ -2,6 +2,8 @@
 # Links every tool in this folder into ~/.local/bin so it's on your PATH.
 # A tool is any folder containing an executable with the same name,
 # e.g. adb-shot/adb-shot. Safe to re-run after adding a new tool.
+# It only makes links in ~/.local/bin. It never creates, changes or removes a
+# tool's config file (~/.config/android-tools/<tool>.conf).
 set -eo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)

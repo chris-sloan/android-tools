@@ -69,7 +69,7 @@ Pages 1-20 of 120. Number to open, Enter for more, q to quit:
 - **b** goes back 20.
 - **q** quits.
 
-`-m 50` shows 50 at a time and `-m 0` shows them all at once. To change the usual number, set `page_limit` at the top of the script. `-s`, `-b` and `-O` narrow a big wiki down.
+`-m 50` shows 50 at a time and `-m 0` shows them all at once. To change the usual number, set `page_limit` in the [config file](#config-file). `-s`, `-b` and `-O` narrow a big wiki down.
 
 When the output goes to a file or another command, or with `-l`, the first 20 pages are printed, with a note of how many there are in all. `-m 0` prints every page; to scroll through them, use `doc-tool -a -l -m 0 | less`.
 
@@ -140,11 +140,11 @@ releases/ 4 of 14 with no current editor
 
 Both are printed, copied to the clipboard and saved as `~/Desktop/<folder>-status-<date>.txt` (`-R`: `<folder>-status-full-<date>.txt`), for example `wiki-status-2026-11-19.txt`. A second report on the same day is saved as `-2`, `-3` and so on, never over the first. `-f file` saves to that file instead.
 
-To save reports somewhere else every time, change `report_dir` at the top of the script; the folder is made if it doesn't exist. Keep it outside the wiki, so reports don't add to it. Set `report_dir=""` to stop saving.
+To save reports somewhere else every time, set `report_dir` in the [config file](#config-file); the folder is made if it doesn't exist. Keep it outside the wiki, so reports don't add to it. Set `report_dir=""` to stop saving.
 
 ## People who have left
 
-List them in `gone` at the top of the script, separated by `|`. Part of a name or email is enough, in any case:
+List them in `gone` in the [config file](#config-file), separated by `|`. Part of a name or email is enough, in any case:
 
 ```bash
 gone="ann@example.com|bob old"
@@ -166,7 +166,34 @@ A commit that reformats or moves every page makes them all look freshly edited. 
 doc-tool -r -x '^chore' -x 'reformat|bulk rename' ~/wiki
 ```
 
-A skipped commit doesn't count as an edit, and its author doesn't count as an editor. If every commit to a page is skipped, the page's first commit is used. To skip the same commits every time, set `ignore_re` at the top of the script.
+A skipped commit doesn't count as an edit, and its author doesn't count as an editor. If every commit to a page is skipped, the page's first commit is used. To skip the same commits every time, set `ignore_re` in the [config file](#config-file).
+
+## Config file
+
+doc-tool reads `~/.config/android-tools/doc-tool.conf` after the built-in defaults at the top of the script, or the same path under `$XDG_CONFIG_HOME` if you set it. `doc-tool -h` prints the exact path. The file is optional, and updates and `install.sh` never create, change or remove it. Don't edit the script: your edits get in the way when you update.
+
+```
+# ~/.config/android-tools/doc-tool.conf
+report_age=6m
+report_dir=~/Documents/wiki-reports
+gone="ann@example.com|bob old"
+page_limit=50
+ignore_re="^chore|reformat"
+```
+
+| Setting | What it sets | Built-in default |
+| --- | --- | --- |
+| `report_age` | Age that counts as stale in `-r` and `-R`, like `-O`: `30d`, `8w`, `6m` or `2y` | `12m` |
+| `report_dir` | Folder reports are saved in. Empty means don't save. | `~/Desktop` |
+| `gone` | People who have left, separated by `\|` | Nobody |
+| `page_limit` | Pages shown at a time, like `-m`. `0` shows all. | `20` |
+| `ignore_re` | Skip commits whose message matches, like `-x` | Skip none |
+
+- One `NAME=value` per line. Blank lines and lines starting with `#` are skipped. Comments go on their own line, not after a value.
+- Names are the ones in the table. Anything else is an error.
+- Quotes around a value are optional. `~/`, `$HOME/` or `${HOME}/` at the start of a value means your home folder. Nothing else is expanded, and the file is never run as a script.
+- Options win over the file. `-x` patterns are added to `ignore_re`.
+- A bad line stops doc-tool with a message naming the file, the line and the setting.
 
 ## How it works
 

@@ -65,7 +65,7 @@ adb-shot -D 4619827677550801153 inner-screen
 
 ## Changing the defaults
 
-Edit the block at the top of the script:
+The built-in defaults are the block at the top of the script:
 
 ```bash
 outdir="$HOME/Desktop"  # where screenshots are saved
@@ -73,6 +73,23 @@ copy=1                  # 1 = also copy the image to the clipboard
 open_after=0            # 1 = open the image in Preview afterwards
 delay=0                 # seconds to wait before taking the shot
 ```
+
+To change them for good, use the config file below. Don't edit the script: your edits get in the way when you update. Command-line options override both for a single run.
+
+## Config file
+
+adb-shot reads `~/.config/android-tools/adb-shot.conf` after its built-in defaults, or the same path under `$XDG_CONFIG_HOME` if you set it. `adb-shot -h` prints the exact path. The file is optional, and updates and `install.sh` never create, change or remove it.
+
+```
+# ~/.config/android-tools/adb-shot.conf
+outdir=~/Pictures/shots
+copy=0
+```
+
+- One `NAME=value` per line. Blank lines and lines starting with `#` are skipped. Comments go on their own line, not after a value.
+- Names are the ones in the block above. Anything else is an error.
+- Quotes around a value are optional. `~/`, `$HOME/` or `${HOME}/` at the start of a value means your home folder. Nothing else is expanded, and the file is never run as a script.
+- A bad line stops adb-shot with a message naming the file, the line and the setting.
 
 ## Notes and limits
 

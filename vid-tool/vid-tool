@@ -17,6 +17,67 @@ size_overhead=4         # -s: percent of the limit held back for file overhead
 min_kbps_per_mpx=300    # -s: ask first if the video gets less than this many
                         #     kb/s per million pixels (a rough quality floor)
 
+# --- Config file (overrides the defaults above; updates never touch it) -------
+# Lines of NAME=value. Blank lines and lines starting with # are skipped. A
+# value may be in "double" or 'single' quotes. A leading ~, $HOME or ${HOME}
+# becomes your home folder. Only the names in the defaults block are allowed.
+# The file is read as text, never run as a script.
+die() { echo "$*" >&2; exit 1; }
+num_re='^[0-9]+(\.[0-9]+)?$'
+int_re='^[0-9]+$'
+gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
+conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/android-tools/vid-tool.conf"
+conf_names=" indir pick_max fix_fps fix_crf webm_crf webm_maxw mp4_crf audio_kbps size_audio_kbps size_overhead min_kbps_per_mpx "
+
+# check_setting <name> <value>: if the value is no good, print why and return 1.
+# The number rules are the ones the matching options use (-r, -q, -W).
+check_setting() {
+  local lo=0 hi=1000000
+  case $1 in
+    indir) [[ -n $2 ]] || { echo "indir can't be empty."; return 1; }; return 0 ;;
+    fix_fps)
+      if [[ ! $2 =~ $num_re ]] || ! gt "$2" 0; then
+        echo "fix_fps needs a frame rate, e.g. 30 (got \"$2\")."; return 1
+      fi
+      return 0 ;;
+    fix_crf | webm_crf | mp4_crf) hi=63 ;;
+    webm_maxw) lo=16 ;;
+    pick_max | audio_kbps | size_audio_kbps) lo=1 ;;
+    size_overhead) hi=99 ;;
+  esac
+  if [[ ! $2 =~ $int_re ]] || (( ${#2} > 7 || 10#$2 < lo || 10#$2 > hi )); then
+    echo "$1 needs a whole number from $lo to $hi (got \"$2\")."; return 1
+  fi
+}
+
+load_config() {
+  [[ -f $conf_file ]] || return 0
+  local line n=0 name val err dq='^"(.*)"$' sq="^'(.*)'\$"
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case $line in '' | '#'*) continue ;; esac
+    [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]] ||
+      die "$conf_file, line $n: expected NAME=value (got \"$line\")."
+    name=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    case $conf_names in *" $name "*) ;; *) die "$conf_file, line $n: unknown setting \"$name\"." ;; esac
+    if [[ $val =~ $dq || $val =~ $sq ]]; then
+      val=${BASH_REMATCH[1]}
+    elif [[ $val == [\"\']* ]]; then
+      die "$conf_file, line $n: $name has an opening quote with no closing one."
+    fi
+    case $val in
+      '~' | '~/'*) val=$HOME${val:1} ;;
+      '$HOME' | '$HOME/'*) val=$HOME${val:5} ;;
+      '${HOME}' | '${HOME}/'*) val=$HOME${val:7} ;;
+    esac
+    err=$(check_setting "$name" "$val") || die "$conf_file, line $n: $err"
+    printf -v "$name" '%s' "$val"
+  done < "$conf_file"
+}
+load_config
+
 usage() {
   cat <<EOF
 Usage: vid-tool [-f | -w | -c] [-s MB] [-t start-end] [-r fps] [-q crf]
@@ -51,17 +112,14 @@ Extras:
   -h            Show this help
 
 Never overwrites: adds -2, -3, ... if the output file already exists.
+
+Config file: $conf_file
+Settings there replace the defaults at the top of vid-tool; options win.
 EOF
 }
 
-die() { echo "$*" >&2; exit 1; }
-
-# --- Small helpers -------------------------------------------------------------
-num_re='^[0-9]+(\.[0-9]+)?$'
-int_re='^[0-9]+$'
 time_re='^([0-9]+:){0,2}[0-9]+(\.[0-9]+)?$'
 
-gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
 ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
 
 # "1:05" or "65" or "0:01:05" -> seconds

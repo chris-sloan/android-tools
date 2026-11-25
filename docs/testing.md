@@ -55,6 +55,7 @@ Plain bash, no framework. `vid-tool/tests/run` is the reference example.
 - Start with `#!/bin/bash` and a header comment: what the tests need, how to run them, and any floor point the tool doesn't meet.
 - Make a temp folder with `mktemp -d`, remove it with a `trap ... EXIT`, and `cd` into it.
 - Use a small `run` helper that takes a label, the expected exit code and a command. It prints one `PASS` or `FAIL` line per check and keeps going after a failure, so one run shows every failure.
+- Set `XDG_CONFIG_HOME` to a folder inside the temp folder, so a tool never reads your real config file. A tool with a config file also tests a value set by it, an option beating it, a missing file, an unknown setting, a bad value and `-h` showing the path.
 - Check outputs as well as exit codes: the files made, the messages printed, and for a fake, how it was called.
 - Print a pass and fail count at the end. Exit non-zero if anything failed.
 - Keep it quick. If a suite gets slow enough that running one check matters, add a name filter to the helper before reaching for a framework.
