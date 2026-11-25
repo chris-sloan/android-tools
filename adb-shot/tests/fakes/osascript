@@ -1,0 +1,8 @@
+#!/bin/bash
+# Fake osascript for the adb-shot tests. Logs the call and does nothing, so the
+# real clipboard is never touched. Reply written by hand: the real osascript
+# prints nothing on success, and the tool only looks at the exit code.
+#   FAKE_LOG               file that gets one line per call
+#   FAKE_OSASCRIPT_EXIT    exit code to return (default 0)
+echo "osascript $*" >> "${FAKE_LOG:-/dev/null}"
+exit "${FAKE_OSASCRIPT_EXIT:-0}"

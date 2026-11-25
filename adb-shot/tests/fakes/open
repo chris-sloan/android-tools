@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake open for the adb-shot tests. Logs the call and opens nothing. Reply
+# written by hand: the real open prints nothing on success.
+echo "open $*" >> "${FAKE_LOG:-/dev/null}"
+exit 0

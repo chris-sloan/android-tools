@@ -1,0 +1,133 @@
+#!/bin/bash
+# Tests for adb-shot. Needs nothing installed: perl and xxd ship with macOS,
+# and adb, osascript and open are replaced with fakes.
+#
+#   adb-shot/tests/run
+#
+# The fake adb is shared with adb-record (tests/fakes/adb at the top of the
+# repo). The fake osascript and open live in adb-shot/tests/fakes. All three
+# log how they were called, so nothing reaches a device, the real clipboard or
+# Preview. HOME points into a temp folder, which is removed on exit. Runs
+# adb-shot under /bin/bash, which on macOS is bash 3.2.
+#
+# Floor points: 1 to 4 are met. Point 5 is partly met: this script runs
+# bash -n, but not shellcheck. shellcheck is not installed on every Mac, and
+# a skip would fail every run when CI is set. It belongs in the top-level
+# tests/run (issue #9), which lints every script.
+
+here=$(cd "$(dirname "$0")" && pwd)
+tool="$here/../adb-shot"
+shared="$here/../../tests/fakes"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/empty" "$work/home"
+cd "$work" || exit 1
+export HOME="$work/home"
+export FAKE_LOG="$work/fake.log" FAKE_STATE="$work"
+export PATH="$here/fakes:$shared:$PATH"
+
+# --- Helpers ----------------------------------------------------------------------
+pass=0; fail=0; skip=0
+out=""
+# run <label> <expected exit code> <command...>
+# Standard input is INPUT (printf %b), sent after DELAY seconds if set. With
+# neither set, the command sees an empty, closed input.
+run() {
+  local label=$1 want=$2 code r; shift 2
+  : > "$FAKE_LOG"
+  out=$( { [[ -n $DELAY ]] && sleep "$DELAY"; printf '%b' "$INPUT"; } | "$@" 2>&1 ); code=$?
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  tr '\r' '\n' <<<"$out" | sed 's/^/    /'
+}
+check() {
+  if eval "$1"; then pass=$((pass+1)); echo "    PASS $1"; else fail=$((fail+1)); echo "    FAIL $1"; fi
+}
+has() { grep -qF -- "$1" <<<"$out"; }
+logged() { grep -qF -- "$1" "$FAKE_LOG"; }
+png() { [[ $(head -c 4 "$1" | xxd -p) == 89504e47 ]]; }
+T() { /bin/bash "$tool" "$@"; }
+two=$'SERIALAAA\tdevice\nSERIALBBB\tdevice\n'
+fold='Display 111\n  powerMode=Off\nDisplay 222\n  powerMode=On\n'
+
+# --- Help and errors ----------------------------------------------------------------
+run "help" 0 T -h;                                       check 'has "Usage: adb-shot"'
+run "unknown option" 1 T -z;                             check 'has "Usage: adb-shot"'
+run "too many arguments" 1 T -C two words;               check 'has "Too many arguments"'
+run "no adb on PATH" 1 env PATH="$work/empty" /bin/bash "$tool" -C x
+check 'has "adb not found on PATH."'
+FAKE_ADB_DEVICES='' run "no devices" 1 T -C -o out x;    check 'has "No devices connected"'
+FAKE_ADB_DEVICES=$'SERIALAAA\tunauthorized\n' run "only an unauthorized device" 1 T -C -o out x
+check 'has "No devices connected"'
+FAKE_ADB_CAPFAIL=1 run "screencap fails" 1 T -C -o out capfail
+check 'has "Screenshot failed." && [[ ! -e out/capfail.png ]]'
+FAKE_ADB_NOPNG=1 run "device returns no PNG" 1 T -C -o out nopng
+check 'has "the device didn'"'"'t return a PNG" && [[ ! -e out/nopng.png ]]'
+FAKE_OSASCRIPT_EXIT=1 run "clipboard copy fails, shot still saved" 0 T -o out clipfail
+check 'has "Couldn'"'"'t copy to the clipboard." && png out/clipfail.png'
+
+# --- One shot ----------------------------------------------------------------------------
+run "one device, copied by default" 0 T -o out basket
+check 'png out/basket.png && has "Saved: out/basket.png" && has "Copied to clipboard."'
+check 'logged "adb -s emulator-5554 exec-out screencap -p"'
+check 'logged "osascript" && logged "out/basket.png"'
+check '! logged "open "'
+run "never overwrites" 0 T -C -o out basket
+check '[[ -f out/basket-2.png ]] && has "Saved: out/basket-2.png"'
+run "-C does not copy" 0 T -C -o out nocopy
+check '! logged "osascript" && ! has "Copied"'
+run "-c copies" 0 T -c -o out copyme;                    check 'logged "osascript" && has "Copied to clipboard."'
+run ".png in the name is not doubled" 0 T -C -o out dotpng.png
+check '[[ -f out/dotpng.png && ! -e out/dotpng.png.png ]]'
+run "default name uses the model" 0 T -C -o named
+check 'ls named | grep -q "^screenshot-Pixel-9-Pro-[0-9]*-[0-9]*\.png$"'
+run "default folder is HOME/Desktop" 0 T -C desk
+check '[[ -f "$HOME/Desktop/desk.png" ]]'
+run "-o makes the folder" 0 T -C -o "new/sub dir" deep;   check '[[ -f "new/sub dir/deep.png" ]]'
+FAKE_ADB_WARN=1 run "warning text before the PNG is stripped" 0 T -C -o out warn
+check 'png out/warn.png'
+run "-p opens the image" 0 T -C -p -o out openme;        check 'logged "open out/openme.png"'
+run "-d counts down first" 0 T -C -d 1 -o out late;      check 'png out/late.png'
+
+# --- Displays ----------------------------------------------------------------------------
+FAKE_ADB_SF=$fold run "foldable: picks the display that is on" 0 T -C -o out fold
+check 'logged "screencap -p -d 222"'
+run "one screen: no display id" 0 T -C -o out onescreen; check '! logged "screencap -p -d"'
+run "-D picks a display" 0 T -C -D 7 -o out disp;        check 'logged "screencap -p -d 7"'
+FAKE_ADB_SF=$fold run "-D wins over the pick" 0 T -C -D 7 -o out disp2
+check 'logged "screencap -p -d 7" && ! logged "-d 222"'
+run "-L lists displays" 0 T -L;                          check 'has "Display 4619827259835644672" && ! logged "screencap"'
+
+# --- Several devices ------------------------------------------------------------------
+FAKE_ADB_DEVICES=$two run "two devices, input ends" 1 T -C -o out x
+check 'has "Select a device:" && ! logged "screencap"'
+INPUT='2\n' FAKE_ADB_DEVICES=$two run "two devices, 2 piped to the menu" 0 T -C -o out second
+check 'logged "adb -s SERIALBBB exec-out"'
+INPUT='9\nx\n1\n' FAKE_ADB_DEVICES=$two run "two devices, bad answers then 1" 0 T -C -o out third
+check 'logged "adb -s SERIALAAA exec-out"'
+
+# --- Series (-n) read from standard input ---------------------------------------------
+INPUT='\n\n\n' run "-n 3: full series" 0 T -n 3 -o out series
+check 'png out/series-1.png && png out/series-2.png && png out/series-3.png && [[ ! -e out/series-4.png ]]'
+# bash prints a read -p prompt only when input is a terminal, so none shows here.
+check '(( $(grep -c "^Saved:" <<<"$out") == 3 )) && (( $(grep -c "^Copied" <<<"$out") == 3 ))'
+check '(( $(grep -c "^osascript" "$FAKE_LOG") == 3 ))'
+INPUT='\n\n' run "-n 2 with -p opens every image" 0 T -C -p -n 2 -o out opened
+check 'logged "open out/opened-1.png out/opened-2.png"'
+INPUT='\n\n' run "-n 3: input cut off after two" 1 T -C -n 3 -o out cut
+check 'has "Input ended after 2 of 3 shots"'
+check 'png out/cut-1.png && png out/cut-2.png && [[ ! -e out/cut-3.png ]]'
+run "-n 2: no input at all" 1 T -C -n 2 -o out none
+check 'has "Input ended after 0 of 2 shots" && [[ ! -e out/none-1.png ]]'
+INPUT='\n' run "-n 1 needs no input" 0 T -C -n 1 -o out single
+check '[[ -f out/single.png ]]'
+
+# --- Lint -------------------------------------------------------------------------------
+run "bash -n" 0 bash -n "$tool"
+run "bash -n (this script)" 0 bash -n "$0"
+
+echo
+echo "$pass passed, $fail failed, $skip skipped."
+if [[ -n ${CI:-} ]] && (( skip > 0 )); then exit 1; fi
+(( fail == 0 ))
