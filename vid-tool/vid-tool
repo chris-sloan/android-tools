@@ -187,10 +187,17 @@ asked=0   # 1 once anything was chosen from a prompt; prints the one-line comman
 
 pick_file() {
   [[ -d $indir ]] || die "No file given, and the default folder $indir doesn't exist."
-  local names=() labels=() f p
+  local names=() labels=() f p seen=0
+  # Newest first. Count the video names, keep the first $pick_max, then drop non-files.
   while IFS= read -r f; do
+    case $f in
+      *.[mM][pP]4|*.[mM][oO][vV]|*.[wW][eE][bB][mM]|*.[mM]4[vV]|*.[mM][kK][vV]) ;;
+      *) continue ;;
+    esac
+    seen=$((seen+1))
+    (( seen > pick_max )) && break
     [[ -f "$indir/$f" ]] && names+=("$f")
-  done < <(ls -t "$indir" 2>/dev/null | grep -iE '\.(mp4|mov|webm|m4v|mkv)$' | head -n "$pick_max")
+  done < <(ls -t "$indir" 2>/dev/null)
   if (( ${#names[@]} == 0 )); then
     die "No videos found in $indir. Pass a file: vid-tool path/to/video.mp4"
   fi
