@@ -9,6 +9,7 @@ A set of simple quality of life Android helper tools.
 | [adb-record](adb-record/README.md) | Record an Android screen with taps shown, then pull the video to your Mac. | `adb-record checkout-crash`, then press Enter to stop |
 | [adb-shot](adb-shot/README.md) | Screenshot an Android screen to your Mac and the clipboard. | `adb-shot basket-overlap` |
 | [vid-tool](vid-tool/README.md) | Fix, shrink, compress and trim a video, for example to get a screen recording under an upload limit. | `vid-tool`, then pick a video and what to do |
+| [doc-tool](doc-tool/README.md) | Find out-of-date Markdown pages in a git folder, such as a wiki, by when git says each was last edited, and open them in glow. | `doc-tool ~/wiki`, then pick what to see |
 
 Every tool prints its options with `-h`. Each tool's README has the full details.
 
@@ -37,6 +38,15 @@ vid-tool -t 0:15-1:05 clip.mp4 # keep only 0:15 to 1:05
 vid-tool -i                    # show what this machine's ffmpeg can do
 vid-tool -w -s 8 -t 0:15-1:05 -W 480 -o ~/Movies "login freeze.mp4"   # most options at once: options first, file last
 vid-tool -f -r 60 -q 20 clip.mp4                                      # the rest: -r is for -f only, and -q is not used with -s
+
+doc-tool ~/wiki                # menu: pages oldest/newest first, who edits them, or a status report
+doc-tool -a ~/wiki             # pages oldest first, then pick one to open in glow
+doc-tool -u ~/wiki/android     # who has edited the pages in a subfolder
+doc-tool -r ~/wiki             # status summary for the whole folder; copied and saved on the Desktop
+doc-tool -R ~/wiki             # full report: the summary plus every stale page, by folder
+doc-tool -a -O 1y -s gradle -b ann -g -x '^chore' ~/wiki   # filters: older than 1 year, mentions gradle, edited by ann, all editors gone, bulk commits skipped
+doc-tool -r -O 6m -C -f ~/Desktop/wiki.txt -l ~/wiki    # the rest: -C don't copy, -f save there instead, -l never offer the picker
+doc-tool -n -m 10 -l ~/wiki    # the 10 most recently edited pages (default 20; -m 0 for all)
 ```
 
 ## Setup
@@ -62,7 +72,15 @@ brew install ffmpeg
 
 If you can't use Homebrew, put your own build of `ffmpeg` on your PATH. vid-tool checks what your build supports each time it runs. See it with `vid-tool -i`, once the tools are installed.
 
-### 3. Install the tools
+### 3. glow (for doc-tool only)
+
+```bash
+brew install glow
+```
+
+doc-tool opens pages in glow. Without it, doc-tool still lists pages, authors and reports; only opening a page needs glow.
+
+### 4. Install the tools
 
 ```bash
 ./install.sh
@@ -70,7 +88,7 @@ If you can't use Homebrew, put your own build of `ffmpeg` on your PATH. vid-tool
 
 This links each tool into `~/.local/bin`, which must be on your PATH. Because they're links, edits to the scripts here take effect straight away.
 
-### 4. Device
+### 5. Device
 
 Turn on **Developer options** (tap **Settings → About phone → Build number** 7 times), then **USB debugging**. Plug the phone in and accept the prompt. Check with `adb devices`.
 

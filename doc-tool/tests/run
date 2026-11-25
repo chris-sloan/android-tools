@@ -1,0 +1,297 @@
+#!/bin/bash
+# Tests for doc-tool. Needs git (ships with the Xcode command line tools);
+# the prompt tests also need expect (ships with macOS).
+#
+#   doc-tool/tests/run
+#
+# Builds small wiki repos with back-dated commits in a temp folder and
+# deletes it on exit. glow and pbcopy are replaced with fakes that log how
+# they were called, so nothing opens and the real clipboard isn't touched.
+# Runs doc-tool under /bin/bash, which on macOS is bash 3.2.
+
+here=$(cd "$(dirname "$0")" && pwd)
+tool="$here/../doc-tool"
+command -v git >/dev/null || { echo "git not found on PATH. Install it with: xcode-select --install" >&2; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+fakes="$work/fakes"
+mkdir -p "$fakes" "$work/empty"
+cd "$work" || exit 1
+
+# Canned fakes: log the call, and for pbcopy what was copied.
+cat > "$fakes/glow" <<'EOF'
+#!/bin/bash
+echo "glow $*" >> "$FAKE_LOG"
+echo "LESS=$LESS PAGER=$PAGER" >> "$FAKE_LOG"
+EOF
+cat > "$fakes/pbcopy" <<'EOF'
+#!/bin/bash
+[[ -z $FAKE_PBCOPY_FAIL ]] || exit 1
+cat > "$FAKE_CLIP"
+EOF
+chmod +x "$fakes/glow" "$fakes/pbcopy"
+export PATH="$fakes:$PATH" FAKE_LOG="$work/fake.log" FAKE_CLIP="$work/clip.txt"
+# Reports save to $HOME/Desktop by default, so keep them out of the real one.
+export HOME="$work/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
+# --- Test repos -------------------------------------------------------------------
+# commit <date> <name> <email> <message> <file>...  (appends a line to each file)
+commit() {
+  local d=$1 n=$2 e=$3 m=$4 f; shift 4
+  for f in "$@"; do mkdir -p "$(dirname "$f")"; echo "$m" >> "$f"; done
+  git add -A
+  GIT_AUTHOR_DATE="${d}T10:00:00" GIT_COMMITTER_DATE="${d}T10:00:00" \
+    git -c user.name="$n" -c user.email="$e" commit -qm "$m"
+}
+
+mkdir "wiki dir" && cd "wiki dir" && git init -q
+commit 2019-03-01 "Ann Old" ann@example.com "Add setup" onboarding/setup.md onboarding/tools.md README.md
+commit 2020-06-01 "Bob Dev" bob@example.com "Release notes" releases/v1.md "releases/old notes.md"
+commit 2021-01-10 "Ann Old" ann@example.com "Gradle tips" android/gradle.md
+commit "$(date -v-40d +%F)" "Cat New" cat@example.com "Update setup" onboarding/setup.md
+commit "$(date -v-20d +%F)" "Bot" bot@example.com "chore: reformat all" onboarding/tools.md releases/v1.md android/gradle.md
+commit "$(date -v-10d +%F)" "Cat New" cat@example.com "Kotlin Coroutines" android/flows.md
+commit "$(date -v-5d +%F)" "Dee Docs" dee@example.com "Typo sweep" README.md
+echo "not markdown" > notes.txt; commit 2022-01-01 x x@example.com "Text" notes.txt
+echo "staged" > staged.md; git add staged.md                 # tracked, never committed
+echo "draft" > untracked.md                                  # not tracked: never a page
+cd "$work" || exit 1
+wiki="$work/wiki dir"
+
+mkdir plain && echo "# hi" > plain/a.md                      # not a git repo
+mkdir nomd && (cd nomd && git init -q && commit 2022-01-01 x x@example.com "Text" a.txt)
+git clone -q --depth 1 "file://$wiki" shallow 2>/dev/null
+
+# A conflict resolved by hand in a merge commit counts as an edit.
+mkdir merged && (cd merged && git init -q -b main &&
+  commit 2020-01-01 "Ann Old" ann@example.com "Add" a.md b.md &&
+  git switch -qc topic && commit 2020-02-01 "Bob Dev" bob@example.com "Topic" a.md &&
+  git switch -q main && commit 2020-03-01 "Ann Old" ann@example.com "Main" a.md &&
+  { git -c user.name="Mel Merge" -c user.email=mel@example.com merge -q topic >/dev/null 2>&1; [[ -f .git/MERGE_HEAD ]]; } && echo resolved > a.md && git add a.md &&
+  GIT_AUTHOR_DATE=2025-06-01T10:00:00 GIT_COMMITTER_DATE=2025-06-01T10:00:00 \
+    git -c user.name="Mel Merge" -c user.email=mel@example.com commit -qm "Merge topic" &&
+  git switch -qc clean && commit 2025-07-01 "Bob Dev" bob@example.com "Clean branch" b.md &&
+  git switch -q main && GIT_AUTHOR_DATE=2025-08-01T10:00:00 GIT_COMMITTER_DATE=2025-08-01T10:00:00 \
+    git -c user.name="Mel Merge" -c user.email=mel@example.com merge -q --no-ff -m "Merge clean" clean)
+
+# Names with quotes and backslashes; one with a tab, which is left out.
+mkdir odd && (cd odd && git init -q &&
+  commit 2021-01-01 "Ann Old" ann@example.com "Odd names" 'Say "hi".md' 'back\slash.md' "$(printf 'tab\there.md')")
+
+# Staged pages, no commits yet.
+mkdir fresh && (cd fresh && git init -q && echo "# new" > new.md && git add new.md)
+
+# Two people with the same name and different emails.
+mkdir alex && (cd alex && git init -q &&
+  commit 2021-01-01 "Alex" alex.one@example.com "One" one.md &&
+  commit 2021-02-01 "Alex" alex.two@example.com "Two" two.md)
+
+# --- Helpers ----------------------------------------------------------------------
+pass=0; fail=0; skip=0
+out=""
+run() {   # label, expected exit code, command...
+  local label=$1 want=$2 code r; shift 2
+  : > "$FAKE_LOG"; rm -f "$FAKE_CLIP"
+  out=$("$@" </dev/null 2>&1); code=$?
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  sed 's/^/    /' <<<"$out"
+}
+check() {
+  if eval "$1"; then pass=$((pass+1)); echo "    PASS $1"; else fail=$((fail+1)); echo "    FAIL $1"; fi
+}
+has() { grep -qF -- "$1" <<<"$out"; }
+# line number of the first output line containing $1
+at() { grep -nF -- "$1" <<<"$out" | head -1 | cut -d: -f1; }
+T() { /bin/bash "$tool" "$@"; }
+
+# --- Help and errors ------------------------------------------------------------------
+run "help" 0 T -h;                                       check 'has "Usage: doc-tool"'
+run "unknown option" 1 T -z
+run "two modes" 1 T -a -u "$wiki";                       check 'has "Pick only one"'
+run "too many arguments" 1 T -a wiki dir;                check 'has "Too many arguments"'
+run "no such folder" 1 T -a "$work/nope";                check 'has "No such folder"'
+run "not a git repo" 1 T -a plain;                       check 'has "isn'"'"'t in a git repo"'
+run "no markdown pages" 1 T -a nomd;                     check 'has "No Markdown pages"'
+run "bad age" 1 T -O 6months "$wiki";                    check 'has "-O needs an age"'
+run "bad pattern" 1 T -x '(' "$wiki";                    check 'has "-x needs a valid pattern"'
+run "-f without -r" 1 T -a -f r.txt "$wiki";             check 'has "-f only works with -r"'
+run "git missing" 1 env PATH="$work/empty" /bin/bash "$tool" -a "$wiki"
+check 'has "doc-tool needs git"'
+
+# --- Pages -------------------------------------------------------------------------------
+run "oldest first (default when not in a terminal)" 0 T "$wiki"
+check 'has "AGE    LAST EDIT"'
+check '(( $(at "old notes.md") < $(at "android/flows.md") ))'
+check 'has "8 pages."'
+check '! has "untracked.md" && ! has "notes.txt"'
+check 'has "uncommitted"'
+run "list from the current folder" 0 bash -c 'cd "$1" && /bin/bash "$2" -a' _ "$wiki" "$tool"
+check 'has "8 pages."'
+run "newest first" 0 T -n "$wiki"
+check '(( $(at "staged.md") < $(at "README.md") ))'
+check '(( $(at "README.md") < $(at "old notes.md") ))'
+run "-l prints the list" 0 T -l -a "$wiki";              check 'has "8 pages."'
+run "-m limits the list" 0 T -n -m 3 "$wiki"
+check '(( $(grep -c "^[0-9.]*[dmoy]* " <<<"$out") == 3 )) && has "staged.md" && ! has "old notes.md"'
+check 'has "Showing 3 of 8 pages. -m sets how many"'
+run "-m 0 shows all" 0 T -a -m 0 "$wiki";                 check 'has "8 pages." && ! has "Showing"'
+run "-m more than there are" 0 T -a -m 20 "$wiki";        check 'has "8 pages." && ! has "Showing"'
+run "-m with a filter" 0 T -a -m 1 -s releases "$wiki";   check 'has "Showing 1 of 2 pages containing" && has "old notes.md"'
+run "bad -m" 1 T -a -m lots "$wiki";                      check 'has "-m needs a number"'
+sed 's/^page_limit=.*/page_limit=2/' "$tool" > "$work/limit2"
+run "page_limit default" 0 /bin/bash "$work/limit2" -a "$wiki"; check 'has "Showing 2 of 8 pages."'
+sed 's/^page_limit=.*/page_limit=x/' "$tool" > "$work/limitx"
+run "bad page_limit" 1 /bin/bash "$work/limitx" -a "$wiki"; check 'has "page_limit at the top"'
+check '[[ ! -s $FAKE_LOG ]]'
+
+run "-x skips bulk commits" 0 T -a -x '^chore' "$wiki"
+check 'grep -q "2020-06-01  Bob Dev            releases/v1.md" <<<"$out"'
+check 'grep -q "Ann Old            onboarding/tools.md" <<<"$out"'
+run "-x repeated, any case" 0 T -a -x NOTHING -x CHORE "$wiki"
+check 'grep -q "Bob Dev            releases/v1.md" <<<"$out"'
+run "-x skips every commit to a page: falls back to its first" 0 T -a -x 'chore|kotlin' "$wiki"
+check 'grep -q "Cat New            android/flows.md" <<<"$out"'
+
+run "-s matches contents, any case" 0 T -s coroutines "$wiki"
+check 'has "android/flows.md" && has "1 page containing"'
+run "-s matches the path" 0 T -s RELEASES "$wiki"
+check 'has "releases/v1.md" && has "old notes.md" && has "2 pages"'
+run "-s no match" 0 T -s zzz "$wiki";                     check 'has "No pages containing"'
+run "-b by name" 0 T -b bob "$wiki";                      check 'has "2 pages edited by"'
+run "-b by email" 0 T -b CAT@example "$wiki";             check 'has "onboarding/setup.md" && has "android/flows.md"'
+run "-b ignores skipped commits" 0 T -b bot -x chore "$wiki"; check 'has "No pages edited by"'
+run "-O" 0 T -O 2y "$wiki"
+check 'has "old notes.md" && ! has "onboarding/setup.md" && has "not edited in 2 years"'
+run "-O days and weeks" 0 T -O 30d "$wiki";               check 'has "onboarding/setup.md"'
+run "-O 1w" 0 T -O 1w -b cat "$wiki";                     check 'has "not edited in 1 week" && has "android/flows.md"'
+
+run "subfolder" 0 T -a "$wiki/android"
+check 'has "flows.md" && ! has "android/" && has "2 pages."'
+run "shallow clone note" 0 T -a shallow;                  check 'has "shallow clone"'
+run "merge that resolved a conflict" 0 T -n merged
+check '[[ $(git -C merged rev-list --merges --count HEAD) == 2 ]]'   # the setup really merged twice
+check 'grep -q "2025-06-01  Mel Merge          a.md" <<<"$out"'
+check 'grep -q "2025-07-01  Bob Dev            b.md" <<<"$out"'   # a clean merge is not an edit
+run "names with quotes and backslashes" 0 T -a odd
+check 'has "Say \"hi\".md" && has "back\\slash.md" && has "2 pages."'
+check 'has "left out 1 page whose names contain a tab"'
+run "search finds them too" 0 T -s "odd names" odd;        check 'has "Say \"hi\".md" && has "2 pages containing"'
+run "no commits yet" 0 T -a fresh;                         check 'has "uncommitted" && has "new.md"'
+run "no commits yet, report" 0 T -r -C fresh;             check 'has "1 page in 1 folder"'
+
+# --- Authors ----------------------------------------------------------------------------
+run "authors" 0 T -u "$wiki"
+check 'has "PAGES  LATEST"'
+check 'grep -qE "^ +4 +0  2021-01-10  Ann Old <ann@example.com>" <<<"$out"'
+check 'grep -qE "^ +3 +3 .*Bot <bot@example.com>" <<<"$out"'
+run "authors with filters" 0 T -u -x chore -s releases "$wiki"
+check 'has "Bob Dev" && ! has "Bot" && has "2 pages containing"'
+run "authors, no pages" 0 T -u -s zzz "$wiki";             check 'has "No pages"'
+run "authors with the same name" 0 T -u alex
+check '(( $(grep -cE "^ +1 +1  .*Alex <alex\.(one|two)@example.com>" <<<"$out") == 2 ))'
+
+# --- Reports -------------------------------------------------------------------------------
+run "summary" 0 T -r -x chore "$wiki"
+check 'has "Docs status: wiki dir"'
+check 'has "8 pages in 4 folders, edited by 4 people."'
+check 'grep -qE "in the last 3 months +4 +50%" <<<"$out" && grep -qE "over 2 years ago +4 +50%" <<<"$out"'
+check 'grep -qE "3 to 12 months ago +0 +0%" <<<"$out"'
+check 'has "Not edited in 12 months: 4 pages (50%)"'
+check '! has "Every editor has left"'
+check 'has "Oldest: onboarding/tools.md, last edited 2019-03-01"'
+check 'grep -qE "^ +2 of 2 +100%  releases/$" <<<"$out" && grep -qE "^ +1 of 2 +50%  android/$" <<<"$out"'
+check '(( $(at "%  releases/") < $(at "%  android/") && $(at "%  android/") < $(at "%  onboarding/") ))'
+check 'grep -qE "^ +2  Ann Old$" <<<"$out" && grep -qE "^ +2  Bob Dev$" <<<"$out"'
+check '! has "by folder:" && ! has "old notes.md"'
+check 'has "Copied to the clipboard."'
+check '[[ -f $FAKE_CLIP ]] && grep -q "Docs status" "$FAKE_CLIP" && ! grep -q "Copied" "$FAKE_CLIP"'
+run "full report" 0 T -R -C -x chore "$wiki"
+check 'has "Not edited in 12 months: 4 pages (50%)" && has "Not edited in 12 months, by folder:"'
+check 'has "android/ 1 of 2 stale" && has "onboarding/ 1 of 2 stale" && has "releases/ 2 of 2 stale"'
+check '(( $(at "android/ 1 of") < $(at "onboarding/ 1 of") && $(at "onboarding/ 1 of") < $(at "releases/ 2 of") ))'
+check '(( $(at "old notes.md") < $(at "releases/v1.md") ))'
+check '! has "Every editor has left"'
+run "summary -O -s -f" 0 T -r -O 2y -s releases -C -f "$work/report.txt" "$wiki"
+check 'has "Only pages containing \"releases\"." && has "2 pages in 1 folder, edited by 2 people."'
+check 'has "Not edited in 2 years: 1 page (50%)"'
+check '[[ ! -f $FAKE_CLIP ]] && grep -q "Docs status" "$work/report.txt"'
+run "full report, nothing stale" 0 T -R -O 99y -C "$wiki"
+check 'has "Not edited in 99 years: 0 pages (0%)" && ! has "by folder" && ! has "most stale"'
+run "report, no pages" 0 T -r -s zzz -C "$wiki";           check 'has "No pages."'
+run "report can't save" 1 T -r -C -f "$work/nope/r.txt" "$wiki"; check 'has "Couldn'"'"'t save"'
+run "report, clipboard fails" 0 env FAKE_PBCOPY_FAIL=1 /bin/bash "$tool" -r "$wiki"
+check 'has "Couldn'"'"'t copy to the clipboard."'
+
+# --- People who have left (the gone list) ------------------------------------------------------
+run "-g with no gone list" 1 T -g "$wiki";                 check 'has "-g needs the people who have left"'
+sed 's/^gone=""/gone="ANN@example||bob dev"/' "$tool" > "$work/gone"
+G() { /bin/bash "$work/gone" "$@"; }
+run "-g" 0 G -g -x chore "$wiki"
+check 'has "4 pages whose editors have all left."'
+check 'has "onboarding/tools.md" && has "android/gradle.md" && has "releases/v1.md" && ! has "README.md"'
+run "-g with -b" 0 G -g -b bob -x chore "$wiki";           check 'has "2 pages edited by \"bob\" whose editors have all left."'
+run "-g, nobody left on these" 0 G -g -s coroutines "$wiki"; check 'has "No pages containing \"coroutines\" whose editors"'
+run "authors marked (left)" 0 G -u -x chore "$wiki"
+check 'has "Ann Old <ann@example.com> (left)" && has "Bob Dev <bob@example.com> (left)"'
+check '! has "Cat New <cat@example.com> (left)" && ! has "Dee Docs <dee@example.com> (left)"'
+run "summary with the gone list" 0 G -r -C -x chore "$wiki"
+check 'has "Every editor has left: 4 pages (50%)"'
+check 'has "Folders with the most pages whose editors have all left:"'
+check '! has "with no current editor"'
+run "full report with the gone list" 0 G -R -C -x chore "$wiki"
+check 'has "Every editor has left, by folder:" && has "android/ 1 of 2 with no current editor"'
+check 'has "releases/ 2 of 2 with no current editor" && ! has "(top level) 1 of 2 with no current editor"'
+check '(( $(at "Not edited in 12 months, by folder:") < $(at "Every editor has left, by folder:") ))'
+run "report -g" 0 G -r -g -C -x chore "$wiki"
+check 'has "Only pages whose editors have all left." && has "4 pages in 3 folders"'
+
+# Saving to the default folder: $HOME/Desktop, made if missing, never overwritten.
+day=$(date +%F)
+rm -rf "$HOME/Desktop"   # earlier report runs saved there too
+run "report saves to the default folder" 0 T -r -C "$wiki"
+check '[[ -f "$HOME/Desktop/wiki dir-status-$day.txt" ]] && has "Saved to $HOME/Desktop/wiki dir-status-$day.txt"'
+run "report again, no overwrite" 0 T -r -C "$wiki"
+check '[[ -f "$HOME/Desktop/wiki dir-status-$day-2.txt" ]]'
+check 'grep -q "Docs status" "$HOME/Desktop/wiki dir-status-$day.txt"'
+run "full report saves with its own name" 0 T -R -C "$wiki"
+check '[[ -f "$HOME/Desktop/wiki dir-status-full-$day.txt" ]]'
+run "-f saves there instead" 0 T -r -C -f "$work/other.txt" "$wiki"
+check '[[ -f $work/other.txt && ! -e "$HOME/Desktop/wiki dir-status-$day-3.txt" ]]'
+touch "$work/afile"
+run "report folder cannot be made" 1 env HOME="$work/afile" /bin/bash "$tool" -r -C "$wiki"
+check 'has "make the report folder"'
+sed 's/^report_dir=.*/report_dir=""/' "$tool" > "$work/nosave"
+run "report_dir empty: nothing saved" 0 /bin/bash "$work/nosave" -r -C "$wiki"
+check '! has "Saved to" && [[ ! -e "$HOME/Desktop/wiki dir-status-$day-3.txt" ]]'
+
+# --- Prompts (need a terminal, so expect) -------------------------------------------------
+if [[ -x /usr/bin/expect ]]; then
+  # menu -> oldest first -> search -> open page 1 -> q; paging with -m 3; then the picker with glow missing.
+  out=$(LESS=-R PAGER=less /usr/bin/expect "$here/prompts.exp" "$tool" "$wiki" "$work/empty" 2>&1); code=$?
+  if [[ $code == 0 ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [prompts] exit=$code (want 0)"
+  sed 's/^/    /' <<<"$out" | tr -d '\r'
+  check 'grep -qF "glow -p $wiki/releases/old notes.md" "$FAKE_LOG"'
+  check 'grep -qF "glow -p $wiki/README.md" "$FAKE_LOG"'   # page 2 of -n, opened from the last screen
+  check 'grep -qF "LESS=-R -Psg top  G bottom" "$FAKE_LOG"'   # less shows the keys while reading
+  check 'grep -qF "PAGER=more" "$FAKE_LOG" && grep -qE "^LESS=-R PAGER=more$" "$FAKE_LOG"'   # but not with another pager
+else
+  skip=$((skip+1)); echo "=== SKIP [prompts] expect not found"
+fi
+
+# --- Lint ---------------------------------------------------------------------------------
+run "bash -n" 0 bash -n "$tool"
+if command -v shellcheck >/dev/null; then
+  run "shellcheck" 0 shellcheck -S warning "$tool" "$0"
+else
+  skip=$((skip+1)); echo "=== SKIP [shellcheck] not installed (brew install shellcheck)"
+fi
+
+echo
+echo "$pass passed, $fail failed, $skip skipped."
+if [[ -n ${CI:-} ]] && (( skip > 0 )); then exit 1; fi
+(( fail == 0 ))
