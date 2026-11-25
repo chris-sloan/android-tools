@@ -125,7 +125,7 @@ check '[[ -f out/single.png ]]'
 
 # --- Lint -------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"
-run "bash -n (this script)" 0 bash -n "$0"
+run "bash -n (this script)" 0 bash -n "$here/run"   # not $0: it may be relative, and we cd'd away
 
 echo
 echo "$pass passed, $fail failed, $skip skipped."
