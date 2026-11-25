@@ -100,7 +100,7 @@ FAKE_ADB_API=33 run "API 33: -l is used as given" 0 T -l 30 -T -o vids old30
 check 'logged "--time-limit 30 /sdcard/" && ! has "Note:"'
 FAKE_ADB_API=x run "API not a number: falls back to 180" 0 T -T -o vids weird
 check 'logged "--time-limit 180 /sdcard/" && has "API x"'
-FAKE_ADB_API= run "API empty: falls back to 180" 0 T -T -o vids blank
+FAKE_ADB_API='' run "API empty: falls back to 180" 0 T -T -o vids blank
 check 'logged "--time-limit 180 /sdcard/" && has "API ?"'
 FAKE_ADB_API=34 run "API 34: unlimited" 0 T -T -o vids edge
 check 'logged "--time-limit 0 /sdcard/" && ! has "Note:"'
