@@ -181,10 +181,10 @@ In place:
 - `vid-tool/tests/Brewfile`, the "provisional" header removed, and the one shellcheck warning (`ls | grep` in `vid-tool`) fixed ([issue #10](https://github.com/chris-sloan/android-tools/issues/10)).
 - `adb-record/tests/run` and `adb-shot/tests/run`, with the shared fake `adb` in `tests/fakes/adb` and the fake `osascript` and `open` in `adb-shot/tests/fakes` ([issue #8](https://github.com/chris-sloan/android-tools/issues/8)). They run `bash -n` but not `shellcheck`, which waits for the top-level `tests/run`. Stopping `adb-record` with Ctrl+C is not tested.
 - `adb-shot -n` reads standard input, and its tests pipe in a full series and a cut-off one ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)).
+- The CI workflow, including the pull request comment (`.github/workflows/tests.yml`, [issue #11](https://github.com/chris-sloan/android-tools/issues/11)).
 
 Not built yet:
 
-- The CI workflow, including the pull request comment ([issue #11](https://github.com/chris-sloan/android-tools/issues/11)).
 - The top-level `tests/run` with lint and the `install.sh` check ([issue #9](https://github.com/chris-sloan/android-tools/issues/9)).
 
 ### The research branch
