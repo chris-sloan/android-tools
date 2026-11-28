@@ -1,0 +1,87 @@
+#!/bin/bash
+# Fake adb shared by the tests for adb-shot and adb-record.
+# Put this folder first on PATH. It answers the adb commands those two tools
+# use with canned output and logs every call. Nothing here talks to a device.
+#
+# Every reply below was written by hand from what the scripts parse. None was
+# copied from a real device. See docs/testing.md ("Use real output when you
+# have it"): if a real device shows a bug these replies miss, add the real
+# output as a case first, then fix the tool.
+#
+# Settings, all optional (set them in the environment):
+#   FAKE_LOG            file that gets one line per call
+#   FAKE_STATE          folder for the fake screenrecord's pid and event files
+#   FAKE_ADB_DEVICES    body of 'adb devices' (printf %b), default one emulator
+#   FAKE_ADB_API        ro.build.version.sdk, default 35 (set but empty: blank)
+#   FAKE_ADB_SF         output of 'dumpsys SurfaceFlinger' (printf %b)
+#   FAKE_ADB_WARN       set: screencap prints a warning line before the PNG
+#   FAKE_ADB_NOPNG      set: screencap returns text, not a PNG
+#   FAKE_ADB_CAPFAIL    set: screencap exits 1
+#   FAKE_ADB_REC_SECS   how long the fake screenrecord runs unless stopped (1)
+#   FAKE_ADB_PULL_FAIL  set: 'adb pull' fails
+echo "adb $*" >> "${FAKE_LOG:-/dev/null}"
+state=${FAKE_STATE:-/tmp}
+
+if [[ $1 == devices ]]; then
+  # Written by hand: the header line and tab-separated "serial<TAB>state" rows
+  # that the scripts read with 'read -r s state _'.
+  echo "List of devices attached"
+  printf '%b' "${FAKE_ADB_DEVICES-emulator-5554\tdevice\n}"
+  echo
+  exit 0
+fi
+if [[ $1 == -s ]]; then shift 2; fi
+
+case "$*" in
+  "shell getprop ro.product.model")
+    # Written by hand. Real adb shell output ends in \r\n, which the tools strip.
+    printf 'Pixel 9 Pro\r\n' ;;
+  "shell getprop ro.build.version.sdk")
+    # Written by hand. A bare number with \r\n.
+    printf '%s\r\n' "${FAKE_ADB_API-35}" ;;
+  "shell settings get system show_touches")
+    # Written by hand. 0 or 1 with \r\n.
+    printf '0\r\n' ;;
+  "shell settings put system show_touches "*)
+    # Written by hand. The real command prints nothing.
+    ;;
+  "shell dumpsys SurfaceFlinger")
+    # Written by hand: only the "Display <id>" and "powerMode=" lines that the
+    # awk in adb-shot looks at. Default is empty, like a one-screen device.
+    printf '%b' "${FAKE_ADB_SF-}" ;;
+  "shell dumpsys SurfaceFlinger --display-id")
+    # Written by hand: one line in the shape adb-shot -L passes through.
+    printf 'Display 4619827259835644672 (HWC display 0): port=129 pnpId=GGL displayName="EMU_display_0"\r\n' ;;
+  "exec-out screencap "*)
+    # Written by hand: the PNG signature plus filler. Not a real image.
+    if [[ -n $FAKE_ADB_CAPFAIL ]]; then exit 1; fi
+    if [[ -n $FAKE_ADB_NOPNG ]]; then echo "error: closed"; exit 0; fi
+    if [[ -n $FAKE_ADB_WARN ]]; then echo "[Warning] Multiple displays were found, but no display id was specified!"; fi
+    printf '\x89PNG\r\n\x1a\nfake-image-data' ;;
+  "shell screenrecord "*)
+    # Written by hand: runs for a while and ends by itself, or stops when
+    # told to. Stopped with TERM, because adb-record starts this as a
+    # background job and bash starts those with SIGINT ignored, so a trap
+    # on INT here would never fire.
+    echo $$ > "$state/rec.pid"
+    sleep "${FAKE_ADB_REC_SECS:-1}" &
+    child=$!
+    trap 'kill "$child" 2>/dev/null; echo stopped-by-signal >> "$state/rec.events"; exit 0' TERM
+    wait "$child"
+    echo ended-by-itself >> "$state/rec.events" ;;
+  "shell pkill -INT screenrecord")
+    # Written by hand. The real command sends SIGINT on the device. The fake
+    # sends TERM to the fake screenrecord (see above).
+    if [[ -f $state/rec.pid ]]; then kill -TERM "$(cat "$state/rec.pid")" 2>/dev/null; fi ;;
+  "pull "*)
+    # Written by hand. The real adb prints "<remote>: 1 file pulled..." to
+    # stdout and errors to stderr. The tools throw stdout away.
+    if [[ -n $FAKE_ADB_PULL_FAIL ]]; then echo "adb: error: failed to stat remote object" >&2; exit 1; fi
+    echo "fake mp4" > "$3"
+    echo "$2: 1 file pulled" ;;
+  "shell rm -f "*)
+    # Written by hand. The real command prints nothing.
+    ;;
+  *) echo "fake adb: unhandled: $*" >&2; exit 97 ;;
+esac
+exit 0

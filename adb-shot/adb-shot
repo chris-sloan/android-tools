@@ -152,7 +152,13 @@ countdown() {
 files=()
 for (( i = 1; i <= count; i++ )); do
   if (( count > 1 )); then
-    read -r -p "Shot $i/$count: press Enter to capture... " _ </dev/tty
+    # Reads standard input, so answers can be piped in. If input ends early,
+    # stop with an error instead of leaving a partial series.
+    if ! read -r -p "Shot $i/$count: press Enter to capture... " _; then
+      echo >&2
+      echo "Input ended after $((i - 1)) of $count shots; stopping." >&2
+      exit 1
+    fi
     file=$(next_file "$base-$i")
   else
     file=$(next_file "$base")

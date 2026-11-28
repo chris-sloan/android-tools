@@ -1,0 +1,130 @@
+#!/bin/bash
+# Tests for adb-record. Needs nothing installed: adb is replaced with a fake.
+#
+#   adb-record/tests/run
+#
+# The fake adb is shared with adb-shot (tests/fakes/adb at the top of the
+# repo). It logs how it was called and never reaches a device. Its fake
+# screenrecord runs a short while, ends by itself, or stops when told to. It
+# is stopped with TERM and not INT, because adb-record starts it as a
+# background job and bash starts those with SIGINT ignored. HOME points into
+# a temp folder, which is removed on exit. Runs adb-record under /bin/bash,
+# which on macOS is bash 3.2.
+#
+# Floor points: 1 to 4 are met. Point 5 is partly met: this script runs
+# bash -n, but not shellcheck. shellcheck is not installed on every Mac, and
+# a skip would fail every run when CI is set. It belongs in the top-level
+# tests/run (issue #9), which lints every script.
+#
+# Not tested: stopping with Ctrl+C. The tool traps INT, but a test that starts
+# the tool as a background job has INT ignored, and a terminal needs expect.
+# Stopping with Enter covers the same stop_recording path.
+
+here=$(cd "$(dirname "$0")" && pwd)
+tool="$here/../adb-record"
+shared="$here/../../tests/fakes"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/empty" "$work/home"
+cd "$work" || exit 1
+export HOME="$work/home"
+export FAKE_LOG="$work/fake.log" FAKE_STATE="$work"
+export PATH="$shared:$PATH"
+
+# --- Helpers ----------------------------------------------------------------------
+pass=0; fail=0
+out=""
+# run <label> <expected exit code> <command...>
+# Standard input is INPUT (printf %b), sent after DELAY seconds if set. With
+# neither set, the command sees an empty, closed input.
+run() {
+  local label=$1 want=$2 code r; shift 2
+  : > "$FAKE_LOG"; rm -f "$work/rec.pid" "$work/rec.events"
+  out=$( { [[ -n $DELAY ]] && sleep "$DELAY"; printf '%b' "$INPUT"; } | "$@" 2>&1 ); code=$?
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  sed 's/^/    /' <<<"$out"
+}
+check() {
+  if eval "$1"; then pass=$((pass+1)); echo "    PASS $1"; else fail=$((fail+1)); echo "    FAIL $1"; fi
+}
+has() { grep -qF -- "$1" <<<"$out"; }
+logged() { grep -qF -- "$1" "$FAKE_LOG"; }
+T() { /bin/bash "$tool" "$@"; }
+two=$'SERIALAAA\tdevice\nSERIALBBB\tdevice\n'
+
+# --- Help and errors ----------------------------------------------------------------
+run "help" 0 T -h;                                       check 'has "Usage: adb-record"'
+run "unknown option" 1 T -z;                             check 'has "Usage: adb-record"'
+run "too many arguments" 1 T two words;                  check 'has "Too many arguments"'
+run "no adb on PATH" 1 env PATH="$work/empty" /bin/bash "$tool" x
+check 'has "adb not found on PATH."'
+FAKE_ADB_DEVICES='' run "no devices" 1 T -o vids x;      check 'has "No devices connected"'
+FAKE_ADB_DEVICES=$'SERIALAAA\tunauthorized\n' run "only an unauthorized device" 1 T -o vids x
+check 'has "No devices connected"'
+FAKE_ADB_PULL_FAIL=1 run "pull fails" 1 T -T -o vids pullfail
+check 'has "Pull failed; the recording is still on the device at /sdcard/screenrecord-"'
+check '! logged "shell rm -f"'
+
+# --- Recording ------------------------------------------------------------------------
+run "records, pulls and cleans up" 0 T -o vids crash
+check '[[ -f vids/crash.mp4 ]] && has "Recording Pixel 9 Pro" && has "Saved: vids/crash.mp4"'
+check 'has "Pulling video..."'
+check 'logged "adb -s emulator-5554 shell screenrecord --time-limit 0 /sdcard/screenrecord-"'
+check 'logged "shell rm -f /sdcard/screenrecord-" && logged ".mp4 vids/crash.mp4"'
+check 'grep -q ended-by-itself "$work/rec.events"'
+run "never overwrites" 0 T -o vids crash
+check '[[ -f vids/crash-2.mp4 ]] && has "Saved: vids/crash-2.mp4"'
+run ".mp4 in the name is not doubled" 0 T -o vids dotmp4.mp4
+check '[[ -f vids/dotmp4.mp4 && ! -e vids/dotmp4.mp4.mp4 ]]'
+run "default name uses the model" 0 T -o named
+check 'ls named | grep -q "^screenrecord-Pixel-9-Pro-[0-9]*-[0-9]*\.mp4$"'
+run "default folder is HOME/Desktop" 0 T desk
+check '[[ -f "$HOME/Desktop/desk.mp4" ]]'
+run "-o makes the folder" 0 T -o "new/sub dir" deep;      check '[[ -f "new/sub dir/deep.mp4" ]]'
+
+# --- Taps ------------------------------------------------------------------------------
+run "taps shown, then restored" 0 T -o vids taps
+check 'logged "settings get system show_touches"'
+check 'logged "settings put system show_touches 1" && logged "settings put system show_touches 0"'
+run "-t shows taps" 0 T -t -o vids taps2;                check 'logged "settings put system show_touches 1"'
+run "-T leaves the setting alone" 0 T -T -o vids notaps; check '! logged "show_touches"'
+
+# --- Time limit ----------------------------------------------------------------------
+run "-l sets the limit" 0 T -l 5 -T -o vids limit5
+check 'logged "--time-limit 5 /sdcard/" && ! has "Note:"'
+FAKE_ADB_API=33 run "API 33: unlimited falls back to 180" 0 T -T -o vids old
+check 'logged "--time-limit 180 /sdcard/" && has "Note: unlimited recording needs Android 14+ (this device is API 33)"'
+FAKE_ADB_API=33 run "API 33: -l is used as given" 0 T -l 30 -T -o vids old30
+check 'logged "--time-limit 30 /sdcard/" && ! has "Note:"'
+FAKE_ADB_API=x run "API not a number: falls back to 180" 0 T -T -o vids weird
+check 'logged "--time-limit 180 /sdcard/" && has "API x"'
+FAKE_ADB_API='' run "API empty: falls back to 180" 0 T -T -o vids blank
+check 'logged "--time-limit 180 /sdcard/" && has "API ?"'
+FAKE_ADB_API=34 run "API 34: unlimited" 0 T -T -o vids edge
+check 'logged "--time-limit 0 /sdcard/" && ! has "Note:"'
+
+# --- Stopping with Enter ---------------------------------------------------------------
+start=$(date +%s)
+DELAY=2 INPUT='\n' FAKE_ADB_REC_SECS=30 run "Enter stops a 30 second recording" 0 T -T -o vids enter
+echo "    took $(( $(date +%s) - start ))s"
+check 'grep -q stopped-by-signal "$work/rec.events" && ! grep -q ended-by-itself "$work/rec.events"'
+check 'logged "shell pkill -INT screenrecord" && [[ -f vids/enter.mp4 ]]'
+check '(( $(date +%s) - start < 20 ))'
+
+# --- Several devices -----------------------------------------------------------------
+FAKE_ADB_DEVICES=$two run "two devices, input ends" 1 T -o vids x
+check 'has "Select a device:" && ! logged "screenrecord"'
+INPUT='2\n' FAKE_ADB_DEVICES=$two run "two devices, 2 piped to the menu" 0 T -T -o vids second
+check 'logged "adb -s SERIALBBB shell screenrecord"'
+INPUT='9\nx\n1\n' FAKE_ADB_DEVICES=$two run "two devices, bad answers then 1" 0 T -T -o vids third
+check 'logged "adb -s SERIALAAA shell screenrecord"'
+
+# --- Lint -------------------------------------------------------------------------------
+run "bash -n" 0 bash -n "$tool"
+run "bash -n (this script)" 0 bash -n "$here/run"   # not $0: it may be relative, and we cd'd away
+
+echo
+echo "$pass passed, $fail failed, 0 skipped."
+(( fail == 0 ))

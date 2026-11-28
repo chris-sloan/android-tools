@@ -99,7 +99,7 @@ Rules for canned fakes:
 | Refuses to prompt unless standard input is a terminal (`[[ -t 0 ]]`) | Test the refusal with no terminal. Test the menus with `expect` |
 
 - **A new tool reads prompts from standard input.** Only require a terminal when there is a reason, and write the reason in a comment.
-- **Don't read from `/dev/tty`.** It fails in CI and can't be tested with a pipe. `adb-shot -n` still does this, and [issue #6](https://github.com/chris-sloan/android-tools/issues/6) is to change it.
+- **Don't read from `/dev/tty`.** It fails in CI and can't be tested with a pipe. `adb-shot -n` used to do this and now reads standard input ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)). If input ends before the series does, it exits non-zero.
 - **Don't use `script` to supply a terminal.** Its arguments differ between macOS and Linux, and on macOS it exited 0 without running the prompts, which would be a false pass.
 - `expect` ships with macOS at `/usr/bin/expect`, so it needs no install. Keep expect scripts in the tool's `tests/` folder.
 
@@ -179,13 +179,13 @@ In place:
 
 - `vid-tool/tests/run` and `vid-tool/tests/prompts.exp`. They follow these guidelines.
 - `vid-tool/tests/Brewfile`, the "provisional" header removed, and the one shellcheck warning (`ls | grep` in `vid-tool`) fixed ([issue #10](https://github.com/chris-sloan/android-tools/issues/10)).
+- `adb-record/tests/run` and `adb-shot/tests/run`, with the shared fake `adb` in `tests/fakes/adb` and the fake `osascript` and `open` in `adb-shot/tests/fakes` ([issue #8](https://github.com/chris-sloan/android-tools/issues/8)). They run `bash -n` but not `shellcheck`, which waits for the top-level `tests/run`. Stopping `adb-record` with Ctrl+C is not tested.
+- `adb-shot -n` reads standard input, and its tests pipe in a full series and a cut-off one ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)).
 
 Not built yet:
 
 - The CI workflow, including the pull request comment ([issue #11](https://github.com/chris-sloan/android-tools/issues/11)).
 - The top-level `tests/run` with lint and the `install.sh` check ([issue #9](https://github.com/chris-sloan/android-tools/issues/9)).
-- Tests for `adb-record` and `adb-shot`, and the shared fake `adb` ([issue #8](https://github.com/chris-sloan/android-tools/issues/8)).
-- `adb-shot -n` reading standard input ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)).
 
 ### The research branch
 
