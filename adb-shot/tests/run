@@ -10,10 +10,9 @@
 # Preview. HOME points into a temp folder, which is removed on exit. Runs
 # adb-shot under /bin/bash, which on macOS is bash 3.2.
 #
-# Floor points: 1 to 4 are met. Point 5 is partly met: this script runs
-# bash -n, but not shellcheck. shellcheck is not installed on every Mac, and
-# a skip would fail every run when CI is set. It belongs in the top-level
-# tests/run (issue #9), which lints every script.
+# Floor points: 1 to 4 are met. Point 5 is met by the top-level tests/run,
+# which runs bash -n and shellcheck on this script. This script does not lint
+# itself, so it needs nothing installed.
 
 here=$(cd "$(dirname "$0")" && pwd)
 tool="$here/../adb-shot"

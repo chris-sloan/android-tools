@@ -98,10 +98,14 @@ Turn on **Developer options** (tap **Settings → About phone → Build number**
 .
 ├── README.md          this file
 ├── install.sh         links every tool into ~/.local/bin
+├── tests/             repo-wide checks (tests/run), shared fakes
 └── <tool>/
     ├── <tool>         the script
-    └── README.md      full docs
+    ├── README.md      full docs
+    └── tests/         the tool's own tests (tests/run)
 ```
+
+Run `tests/run` for the repo-wide checks, or `<tool>/tests/run` for one tool. See [docs/testing.md](docs/testing.md).
 
 ## Adding a tool
 

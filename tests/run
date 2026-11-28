@@ -1,0 +1,128 @@
+#!/bin/bash
+# Repo-wide checks. Needs shellcheck for the lint check.
+#
+#   tests/run
+#
+# Checks that belong to no single tool (docs/testing.md, "Repo-wide checks"):
+#   1. bash -n and shellcheck -S warning on every tool script, every tests/run
+#      and install.sh. The list is found, not written down.
+#   2. install.sh, run with HOME in a temp folder, links every tool and nothing
+#      else.
+#   3. Every tool has a README.md, a tests/run and a row in the main README's
+#      Tools table.
+#   4. Nothing in the top-level tests/ folder is named tests, or install.sh
+#      would link it as a tool.
+#
+# Not linted: the fakes under tests/fakes and */tests/fakes. They are test
+# scaffolding that imitates other programs, and they have no tests of their
+# own. Their behaviour is exercised by the tool tests that use them.
+#
+# Prints one PASS or FAIL line per check and keeps going after a failure. A
+# check that can't run prints a SKIP line saying why. On a Mac a skip is not a
+# failure. When the CI variable is set, a skip makes the run fail. Works in a
+# temp folder that is removed on exit. Bash 3.2 safe.
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+pass=0; fail=0; skip=0
+ok()   { pass=$((pass+1)); echo "=== PASS [$1]"; }
+bad()  { fail=$((fail+1)); echo "=== FAIL [$1]"; shift; [[ $# -gt 0 ]] && printf '    %s\n' "$@"; }
+# check <label> <command...>: PASS if the command exits 0. Its output is shown on FAIL.
+check() {
+  local label=$1 out; shift
+  if out=$("$@" 2>&1); then ok "$label"; else
+    bad "$label"; [[ -n $out ]] && printf '%s\n' "$out" | sed 's/^/    /'
+  fi
+}
+
+# --- Discovery ----------------------------------------------------------------------
+# A tool is a folder holding an executable of the same name. Same rule as install.sh.
+tools=""
+for dir in "$root"/*/; do
+  name=$(basename "$dir")
+  [[ -x $dir$name ]] && tools="$tools$name"$'\n'
+done
+
+scripts=""
+for name in $tools; do
+  scripts="$scripts$name/$name"$'\n'
+  [[ -f $root/$name/tests/run ]] && scripts="$scripts$name/tests/run"$'\n'
+done
+[[ -f $root/tests/run ]] && scripts="$scripts""tests/run"$'\n'
+scripts="${scripts}install.sh"$'\n'
+# A tests/run in a folder that is not a tool is still linted.
+for f in "$root"/*/tests/run; do
+  rel=${f#"$root"/}
+  case $'\n'$scripts in *$'\n'"$rel"$'\n'*) ;; *) scripts="$scripts$rel"$'\n' ;; esac
+done
+
+echo "Tools: $(echo $tools)"
+echo
+
+# --- 1. Lint ------------------------------------------------------------------------
+for s in $scripts; do
+  check "bash -n $s" bash -n "$root/$s"
+done
+if command -v shellcheck >/dev/null; then
+  for s in $scripts; do
+    check "shellcheck $s" shellcheck -S warning "$root/$s"
+  done
+else
+  skip=$((skip+1))
+  echo "=== SKIP [shellcheck] not installed, so no shellcheck run (brew bundle --file=tests/Brewfile)"
+fi
+
+# --- 2. install.sh ------------------------------------------------------------------
+home="$work/home"
+mkdir -p "$home"
+install_out=$(HOME="$home" /bin/bash "$root/install.sh" 2>&1); install_code=$?
+if [[ $install_code == 0 ]]; then ok "install.sh exits 0"; else bad "install.sh exits 0" "exit=$install_code" "$install_out"; fi
+
+bin="$home/.local/bin"
+want=$(printf '%s' "$tools" | sort)
+got=$(ls -A "$bin" 2>/dev/null | sort)
+if [[ $got == "$want" ]]; then ok "install.sh links every tool and nothing else"; else
+  bad "install.sh links every tool and nothing else" "want: $(echo $want)" "got:  $(echo $got)"
+fi
+
+wrong=""
+for name in $tools; do
+  [[ $(readlink "$bin/$name") == "$root/$name/$name" ]] || wrong="$wrong $name"
+done
+if [[ -z $wrong ]]; then ok "each link points at its tool"; else bad "each link points at its tool" "wrong:$wrong"; fi
+
+linked=""
+for f in "$root"/tests/*; do
+  [[ -e $bin/$(basename "$f") ]] && linked="$linked $(basename "$f")"
+done
+[[ -e $bin/tests ]] && linked="$linked tests"
+if [[ -z $linked ]]; then ok "nothing from tests/ is linked"; else bad "nothing from tests/ is linked" "linked:$linked"; fi
+
+extra=$(find "$home" -mindepth 1 -not -path "$home/.local" -not -path "$bin" -not -path "$bin/*" 2>/dev/null)
+if [[ -z $extra ]]; then ok "install.sh writes only under ~/.local/bin"; else bad "install.sh writes only under ~/.local/bin" "$extra"; fi
+
+# --- 3. Every tool is complete ------------------------------------------------------
+for name in $tools; do
+  if [[ -f $root/$name/README.md ]]; then ok "$name has a README.md"; else bad "$name has a README.md"; fi
+  if [[ -x $root/$name/tests/run ]]; then ok "$name has an executable tests/run"; else bad "$name has an executable tests/run"; fi
+  if grep -qF "| [$name]($name/README.md) |" "$root/README.md"; then ok "$name has a row in the README Tools table"; else
+    bad "$name has a row in the README Tools table" "expected a row starting: | [$name]($name/README.md) |"
+  fi
+done
+
+# --- 4. No top-level tests/tests ----------------------------------------------------
+if [[ ! -e $root/tests/tests ]]; then ok "nothing in tests/ is named tests"; else
+  bad "nothing in tests/ is named tests" "tests/tests would be linked as a tool by install.sh"
+fi
+
+# --- Summary ------------------------------------------------------------------------
+if [[ -n $CI && $skip -gt 0 ]]; then
+  fail=$((fail+1))
+  echo "=== FAIL [skips] CI is set, so $skip skipped check(s) count as failures"
+fi
+echo
+echo "$pass passed, $fail failed, $skip skipped."
+[[ $fail == 0 ]]

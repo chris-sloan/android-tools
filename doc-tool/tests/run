@@ -250,6 +250,7 @@ run "report -g" 0 G -r -g -C -x chore "$wiki"
 check 'has "Only pages whose editors have all left." && has "4 pages in 3 folders"'
 
 # Saving to the default folder: $HOME/Desktop, made if missing, never overwritten.
+# shellcheck disable=SC2034  # used inside the check strings below, which check evals
 day=$(date +%F)
 rm -rf "$HOME/Desktop"   # earlier report runs saved there too
 run "report saves to the default folder" 0 T -r -C "$wiki"
@@ -286,9 +287,9 @@ fi
 # --- Lint ---------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"
 if command -v shellcheck >/dev/null; then
-  run "shellcheck" 0 shellcheck -S warning "$tool" "$0"
+  run "shellcheck" 0 shellcheck -S warning "$tool" "$here/run"   # not $0: it may be relative, and we cd'd away
 else
-  skip=$((skip+1)); echo "=== SKIP [shellcheck] not installed (brew install shellcheck)"
+  skip=$((skip+1)); echo "=== SKIP [shellcheck] not installed (brew bundle --file=doc-tool/tests/Brewfile)"
 fi
 
 echo
