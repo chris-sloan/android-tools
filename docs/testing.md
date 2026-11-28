@@ -177,14 +177,14 @@ As of 2026-11-15. Update this section as the items land, and delete it once they
 
 In place:
 
-- `vid-tool/tests/run` and `vid-tool/tests/prompts.exp`. They follow these guidelines, but still carry a "provisional" header and have no `Brewfile`.
+- `vid-tool/tests/run` and `vid-tool/tests/prompts.exp`. They follow these guidelines.
+- `vid-tool/tests/Brewfile`, the "provisional" header removed, and the one shellcheck warning (`ls | grep` in `vid-tool`) fixed ([issue #10](https://github.com/chris-sloan/android-tools/issues/10)).
 
 Not built yet:
 
 - The CI workflow, including the pull request comment ([issue #11](https://github.com/chris-sloan/android-tools/issues/11)).
 - The top-level `tests/run` with lint and the `install.sh` check ([issue #9](https://github.com/chris-sloan/android-tools/issues/9)).
 - Tests for `adb-record` and `adb-shot`, and the shared fake `adb` ([issue #8](https://github.com/chris-sloan/android-tools/issues/8)).
-- `vid-tool/tests/Brewfile`, the "provisional" header removed, and the one shellcheck warning (`ls | grep` in `vid-tool`) fixed ([issue #10](https://github.com/chris-sloan/android-tools/issues/10)).
 - `adb-shot -n` reading standard input ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)).
 
 ### The research branch

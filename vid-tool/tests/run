@@ -7,12 +7,15 @@
 # folder on exit. Exits non-zero if any check fails. Runs vid-tool under
 # /bin/bash, which on macOS is bash 3.2.
 #
-# Provisional: written alongside the tool, before the repo had a testing
-# convention. Expect it to be reworked.
+# A check that can't run prints a SKIP line saying why. On a Mac a skip is not
+# a failure. When the CI variable is set, a skip makes the run fail.
 
 here=$(cd "$(dirname "$0")" && pwd)
 tool="$here/../vid-tool"
-real=$(command -v ffmpeg) || { echo "ffmpeg not found on PATH." >&2; exit 1; }
+real=$(command -v ffmpeg) || {
+  echo "ffmpeg not found on PATH. Install it with: brew bundle --file=vid-tool/tests/Brewfile" >&2
+  exit 1
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -47,7 +50,7 @@ cp clip.mp4 "with space.mp4"
 echo "not a video" > notes.txt
 
 # --- Helpers ----------------------------------------------------------------------
-pass=0; fail=0
+pass=0; fail=0; skip=0
 run() {   # label, expected exit code, command...
   local label=$1 want=$2 out code r; shift 2
   out=$("$@" </dev/null 2>&1); code=$?
@@ -133,7 +136,7 @@ if "$real" -hide_banner -encoders 2>/dev/null | grep -q h264_videotoolbox; then
   HIDE='libx264' run "no libx264: size, scaled down" 0 T -s 0.5 -W 270 -o vt clip.mp4
   check '(( $(size vt/clip-compressed-2.mp4) <= 500000 ))'
 else
-  echo "=== SKIP h264_videotoolbox fallback: this ffmpeg doesn't have it"
+  skip=$((skip+1)); echo "=== SKIP [h264_videotoolbox fallback] this ffmpeg doesn't have the encoder"
 fi
 HIDE='libx264|videotoolbox|libvpx' run "no video encoders: info" 0 T -i
 HIDE='libx264|videotoolbox|libvpx' run "no video encoders: compress" 1 T -c clip.mp4
@@ -151,9 +154,10 @@ if command -v expect >/dev/null; then
     fail=$((fail+1)); echo "=== FAIL [prompts]"
   fi
 else
-  echo "=== SKIP prompts: expect not installed"
+  skip=$((skip+1)); echo "=== SKIP [prompts] expect not found"
 fi
 
 echo
-echo "TOTAL pass=$pass fail=$fail"
+echo "TOTAL pass=$pass fail=$fail skip=$skip"
+if [[ -n ${CI:-} ]] && (( skip > 0 )); then echo "CI is set, so a skip counts as a failure." >&2; exit 1; fi
 (( fail == 0 ))
