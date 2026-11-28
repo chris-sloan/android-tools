@@ -8,6 +8,14 @@
 # deletes it on exit. glow and pbcopy are replaced with fakes that log how
 # they were called, so nothing opens and the real clipboard isn't touched.
 # Runs doc-tool under /bin/bash, which on macOS is bash 3.2.
+#
+# The menu and the page picker use fzf when fzf is on PATH and standard input
+# and error are terminals. This script hides fzf from the other checks, the
+# prompt tests included, by setting ANDROID_TOOLS_NO_FZF=1 (the tool's
+# documented switch). The fzf checks turn it back on and run the tool through
+# tests/tty.exp (expect, which ships with macOS) so it has a terminal. They put
+# a fake fzf (tests/fakes/fzf) on PATH, so a real fzf on the machine is never
+# used.
 
 here=$(cd "$(dirname "$0")" && pwd)
 tool="$here/../doc-tool"
@@ -32,6 +40,7 @@ cat > "$FAKE_CLIP"
 EOF
 chmod +x "$fakes/glow" "$fakes/pbcopy"
 export PATH="$fakes:$PATH" FAKE_LOG="$work/fake.log" FAKE_CLIP="$work/clip.txt"
+export ANDROID_TOOLS_NO_FZF=1 FAKE_FZF_LOG="$work/fzf.log" FAKE_STATE="$work"
 # Reports save to $HOME/Desktop by default, so keep them out of the real one.
 export HOME="$work/home"
 mkdir -p "$HOME"
@@ -324,6 +333,80 @@ if [[ -x /usr/bin/expect ]]; then
   check 'grep -qF "PAGER=more" "$FAKE_LOG" && grep -qE "^LESS=-R PAGER=more$" "$FAKE_LOG"'   # but not with another pager
 else
   skip=$((skip+1)); echo "=== SKIP [prompts] expect not found"
+fi
+
+# --- Menu and page picker with fzf (through a real terminal, with a fake fzf) ------------------
+# shellcheck disable=SC2034  # used inside the single-quoted strings that check evaluates
+tab=$'\t'
+fzf_logged() { grep -qF -- "$1" "$FAKE_FZF_LOG"; }
+# trun <label> <expected exit code> <command...>: like run, but the command has a
+# terminal on standard input, output and error. T means the tool.
+trun() {
+  local label=$1 want=$2 code r; shift 2
+  if [[ $1 == T ]]; then shift; set -- /bin/bash "$tool" "$@"; fi
+  : > "$FAKE_LOG"; : > "$FAKE_FZF_LOG"; rm -f "$FAKE_CLIP" "$work/fzf.count"
+  out=$(/usr/bin/expect "$here/../../tests/tty.exp" "$@" 2>&1); code=$?
+  out=${out//$'\r'/}
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  sed 's/^/    /' <<<"$out"
+}
+if [[ -x /usr/bin/expect ]]; then
+  fzf_path="$here/../../tests/fakes:$PATH"
+
+  # Menu: newest first (2), open the first page, then Esc ends the picker like q.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="2 1 esc" trun "fzf menu, then page picker" 0 T -s release "$wiki"
+  check 'has "Same thing in one line: doc-tool -n -s release " && ! has "What would you like to see" && ! has "Number to open"'
+  check 'grep -qF "glow -p $wiki/releases/v1.md" "$FAKE_LOG" && (( $(grep -c "^glow " "$FAKE_LOG") == 1 ))'
+  check '(( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 3 ))'
+  check 'fzf_logged "--prompt=Show> " && fzf_logged "--header=What would you like to see in $wiki?"'
+  check 'fzf_logged "  in: 1${tab}Pages, oldest first" && fzf_logged "  in: 5${tab}Full status report"'
+  check 'fzf_logged "--prompt=Page> " && fzf_logged "--with-nth=2" && fzf_logged "--delimiter=$tab"'
+  check 'fzf_logged "--preview=head -n 60 {3..}" && fzf_logged "--header=2 pages containing \"release\"."'
+  check 'fzf_logged "AGE    LAST EDIT"'
+  # Newest first: v1.md (the bot touched it 20 days ago) before old notes.md. The
+  # third field is the page's full path, which is what the preview reads.
+  check 'grep -qE "^  in: 1${tab}[0-9a-z.]+ +[0-9-]+ +Bot +releases/v1.md${tab}$wiki/releases/v1.md$" "$FAKE_FZF_LOG"'
+  check 'grep -qE "^  in: 2${tab}[0-9a-z.]+ +2020-06-01 +Bob Dev +releases/old notes.md${tab}$wiki/releases/old notes.md$" "$FAKE_FZF_LOG"'
+
+  # Pages: open two (the second from the second line), then quit.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="1 2 esc" trun "fzf page picker opens pages until Esc" 0 T -a -s release "$wiki"
+  check 'grep -qF "glow -p $wiki/releases/old notes.md" "$FAKE_LOG" && grep -qF "glow -p $wiki/releases/v1.md" "$FAKE_LOG"'
+  check '(( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 3 )) && ! has "Same thing in one line"'
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="none" trun "fzf page picker: no match ends it" 0 T -a "$wiki"
+  check '! grep -q "^glow " "$FAKE_LOG" && (( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 1 ))'
+  check 'fzf_logged "  in: 8${tab}"'   # all 8 pages are offered, not just the first -m
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="1 esc" trun "fzf page picker: a page name with a quote and backslash" 0 T -a odd
+  check 'grep -qF "glow -p $work/odd/Say \"hi\".md" "$FAKE_LOG" || grep -qF "glow -p $work/odd/back\\slash.md" "$FAKE_LOG"'
+  # glow missing: the page picker says so and stops.
+  PATH="$here/../../tests/fakes:/usr/bin:/bin" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="1" trun "fzf page picker: glow missing" 1 T -a -s release "$wiki"
+  check 'has "glow isn'"'"'t installed"'
+
+  # Esc or no match at the menu stops the tool.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=esc trun "fzf menu: Esc exits" 1 T "$wiki"
+  check 'has "Nothing chosen; stopping." && ! has "Same thing in one line"'
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=none trun "fzf menu: no match exits" 1 T "$wiki"
+  check 'has "Nothing chosen; stopping."'
+  # Status report from the menu, then the search prompt is still asked.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=4 TTY_PROMPT='for all\): ' TTY_REPLY='' trun "fzf menu: status summary, then the search prompt" 0 T -C "$wiki"
+  check 'has "Docs status: wiki dir" && has "Same thing in one line: doc-tool -r -C "'
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=3 trun "fzf menu: who edits the pages" 0 T -s release "$wiki"
+  check 'has "PAGES  LATEST" && has "Same thing in one line: doc-tool -u -s release "'
+
+  # fzf is not used for a plain list, or when a mode is given and there is nothing to pick.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' trun "fzf: -l just prints the list" 0 T -l -a "$wiki"
+  check 'has "8 pages." && [[ ! -s $FAKE_FZF_LOG ]]'
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' trun "fzf: a report has no picker" 0 T -r -C "$wiki"
+  check 'has "Docs status" && [[ ! -s $FAKE_FZF_LOG ]]'
+
+  # fzf stays off when switched off, or when standard error is not the terminal.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF=1 TTY_PROMPT='> ' TTY_REPLY=3 trun "ANDROID_TOOLS_NO_FZF keeps the numbered menu" 0 T -s release "$wiki"
+  check 'has "What would you like to see in" && has "3) Who edits these pages" && has "PAGES  LATEST" && [[ ! -s $FAKE_FZF_LOG ]]'
+  # The select menu draws on standard error, so its answer is typed blind here.
+  PATH="$fzf_path" ANDROID_TOOLS_NO_FZF='' TTY_BLIND=1 TTY_REPLY=3 trun "stderr not a terminal: numbered menu, not fzf" 0 /bin/bash -c 'exec /bin/bash "$0" "$@" 2>/dev/null' "$tool" -s release "$wiki"
+  check 'has "PAGES  LATEST" && [[ ! -s $FAKE_FZF_LOG ]]'
+else
+  skip=$((skip+1)); echo "=== SKIP [fzf pickers] expect not found"
 fi
 
 # --- Lint ---------------------------------------------------------------------------------

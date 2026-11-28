@@ -7,6 +7,13 @@
 # folder on exit. Exits non-zero if any check fails. Runs vid-tool under
 # /bin/bash, which on macOS is bash 3.2.
 #
+# The pickers use fzf when fzf is on PATH and standard input and error are
+# terminals. This script hides fzf from the other checks, the prompt tests
+# included, by setting ANDROID_TOOLS_NO_FZF=1 (the tool's documented switch).
+# The fzf checks turn it back on and run the tool through tests/tty.exp (expect,
+# which ships with macOS) so it has a terminal. They put a fake fzf
+# (tests/fakes/fzf) first on PATH, so a real fzf on the machine is never used.
+#
 # A check that can't run prints a SKIP line saying why. On a Mac a skip is not
 # a failure. When the CI variable is set, a skip makes the run fail.
 
@@ -25,6 +32,9 @@ cd "$work" || exit 1
 # The tool reads its config from here, never from the real ~/.config.
 export XDG_CONFIG_HOME="$work/config"
 conf="$XDG_CONFIG_HOME/android-tools/vid-tool.conf"
+
+fakes="$here/../../tests/fakes"
+export ANDROID_TOOLS_NO_FZF=1 FAKE_FZF_LOG="$work/fzf.log" FAKE_STATE="$work"
 
 # A fake ffmpeg that hides encoders matching $HIDE from 'ffmpeg -encoders',
 # and passes everything else to the real one. Simulates a build without them.
@@ -201,6 +211,86 @@ if command -v expect >/dev/null; then
   fi
 else
   skip=$((skip+1)); echo "=== SKIP [prompts] expect not found"
+fi
+
+# --- Pickers with fzf (through a real terminal, with a fake fzf) ---------------------------
+out=""
+has() { grep -qF -- "$1" <<<"$out"; }
+fzf_logged() { grep -qF -- "$1" "$FAKE_FZF_LOG"; }
+# shellcheck disable=SC2034  # used inside the single-quoted strings that check evaluates
+tab=$'\t'
+# trun <label> <expected exit code> <command...>: like run, but the command has a
+# terminal on standard input, output and error. T means the tool.
+trun() {
+  local label=$1 want=$2 code r; shift 2
+  if [[ $1 == T ]]; then shift; set -- /bin/bash "$tool" "$@"; fi
+  : > "$FAKE_FZF_LOG"; rm -f "$work/fzf.count"
+  out=$(/usr/bin/expect "$here/../../tests/tty.exp" "$@" 2>&1); code=$?
+  out=$(tr '\r' '\n' <<<"$out" | grep -vE '^(frame=|\[libx264|\[libvpx|$)')
+  if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
+  echo "=== $r [$label] exit=$code (want $want)"
+  sed 's/^/    /' <<<"$out"
+}
+if command -v expect >/dev/null; then
+  export PATH="$fakes:$PATH"
+  # The two folders the file picker lists: "Screen 2.mp4" is the newer.
+  fh="$work/fhome"
+  mkdir -p "$fh/Desktop"
+  cp odd.mp4 "$fh/Desktop/Screen 1.mp4"; cp odd.mp4 "$fh/Desktop/Screen 2.mp4"
+  touch -t 202001010000 "$fh/Desktop/Screen 1.mp4"
+  echo "a note" > "$fh/Desktop/notes.txt"
+
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=3 TTY_PROMPT='keep it all: ' TTY_REPLY='' trun "fzf action menu: compress" 0 T -o pick clip.mp4
+  check 'has "Same thing in one line: vid-tool -c " && [[ -f pick/clip-compressed.mp4 ]]'
+  check '! has "What do you want to do?" && ! has "1) It plays"'
+  check 'fzf_logged "--prompt=Action> " && fzf_logged "--header=What do you want to do?" && fzf_logged "--with-nth=2"'
+  check 'fzf_logged "  in: 1${tab}It plays in slow motion: fix it" && fzf_logged "  in: 4${tab}Get it under a size limit, as MP4"'
+  check '(( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 1 )) && ! fzf_logged "--preview"'
+
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=esc trun "fzf action menu: Esc exits" 1 T -o pick clip.mp4
+  check 'has "Nothing chosen; stopping."'
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=none trun "fzf action menu: no match exits" 1 T -o pick clip.mp4
+  check 'has "Nothing chosen; stopping."'
+
+  # An unavailable choice says so and asks again.
+  PATH="$stub:$PATH" HIDE=libvpx ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="2 3" TTY_PROMPT='keep it all: ' TTY_REPLY='' trun "fzf action menu: unavailable choice asks again" 0 T -o pick clip.mp4
+  check 'has "Not available: this ffmpeg has no VP9 encoder" && has "Same thing in one line: vid-tool -c "'
+  check '(( $(grep -c "^fzf " "$FAKE_FZF_LOG") == 2 )) && fzf_logged "  in: 2${tab}Make a small WebM to share (no audio)  (not available: this ffmpeg has no VP9 encoder"'
+
+  # Low quality choices, reached with -s.
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=1 trun "fzf low quality menu: scale down" 0 T -s 0.25 -o pick clip.mp4
+  check 'fzf_logged "--prompt=Next> " && fzf_logged "  in: 1${tab}Scale down to " && fzf_logged "  in: 4${tab}Cancel" && has "Saved: "'
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=2 TTY_PROMPT='Enter to go back\): ' TTY_REPLY='2-6' trun "fzf low quality menu: trim" 0 T -s 0.25 -o pick clip.mp4
+  check 'has "Keep which part?" && has "Saved: "'
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=4 trun "fzf low quality menu: cancel" 1 T -s 0.25 -o pick clip.mp4
+  check 'has "Cancelled; nothing was saved."'
+  ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=esc trun "fzf low quality menu: Esc cancels" 1 T -s 0.25 -o pick clip.mp4
+  check 'has "Cancelled; nothing was saved."'
+
+  # File picker, then the action menu.
+  HOME="$fh" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ="2 3" TTY_PROMPT='keep it all: ' TTY_REPLY='' trun "fzf file picker, then action menu" 0 T
+  check '[[ -f "$fh/Desktop/Screen 1-compressed.mp4" && ! -e "$fh/Desktop/Screen 2-compressed.mp4" ]]'   # the picker was asked for line 2, the older file
+  check 'fzf_logged "--prompt=Video> " && fzf_logged "--header=Pick a video from $fh/Desktop (newest first)"'
+  check 'fzf_logged "--preview=ffmpeg -nostdin -hide_banner -i {3..}" && fzf_logged "--delimiter=$tab"'
+  check 'grep -qE "^  in: 1${tab}Screen 2.mp4  \(.*\)${tab}$fh/Desktop/Screen 2.mp4$" "$FAKE_FZF_LOG"'
+  check 'grep -qE "^  in: 2${tab}Screen 1.mp4  \(.*\)${tab}$fh/Desktop/Screen 1.mp4$" "$FAKE_FZF_LOG"'
+  check '! fzf_logged "notes.txt"'
+  HOME="$fh" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=esc trun "fzf file picker: Esc exits" 1 T
+  check 'has "No video chosen." && ! fzf_logged "Action>"'
+  HOME="$fh" ANDROID_TOOLS_NO_FZF='' FAKE_FZF_SEQ=1 TTY_PROMPT='keep it all: ' TTY_REPLY='' trun "fzf: a file given needs no file picker" 0 T -f -o pick "$fh/Desktop/Screen 1.mp4"
+  check '[[ ! -s $FAKE_FZF_LOG ]]'
+
+  # fzf stays off when switched off, or when standard error is not the terminal.
+  # Answering 4 (Cancel) at the numbered menu exits 1. Had fzf been used, the fake
+  # would have picked line 1 and the run would have succeeded.
+  ANDROID_TOOLS_NO_FZF=1 TTY_PROMPT='> ' TTY_REPLY=4 trun "ANDROID_TOOLS_NO_FZF keeps the numbered menu" 1 T -s 0.25 -o pick clip.mp4
+  check 'has "4) Cancel" && has "Cancelled; nothing was saved." && [[ ! -s $FAKE_FZF_LOG ]]'
+  # Standard error is not the terminal here, so the menu is the numbered one too
+  # (it draws on standard error, so the answer is typed blind).
+  ANDROID_TOOLS_NO_FZF='' TTY_BLIND=1 TTY_REPLY=4 trun "stderr not a terminal: numbered menu, not fzf" 1 /bin/bash -c 'exec /bin/bash "$0" "$@" 2>/dev/null' "$tool" -s 0.25 -o pick clip.mp4
+  check '[[ ! -s $FAKE_FZF_LOG ]]'
+else
+  skip=$((skip+1)); echo "=== SKIP [fzf pickers] expect not found"
 fi
 
 echo

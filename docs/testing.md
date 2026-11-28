@@ -45,7 +45,7 @@ the top of its `tests/run`, so the gap is written down and not forgotten.
 ```
 
 - A tool's tests live next to the tool.
-- The top-level `tests/` folder holds only what belongs to no single tool: the repo-wide checks, helpers used by more than one tool, and fakes used by more than one tool (the fake `adb`). Don't move something there until a second tool needs it.
+- The top-level `tests/` folder holds only what belongs to no single tool: the repo-wide checks, helpers used by more than one tool (`tty.exp`), and fakes used by more than one tool (the fake `adb` and `fzf`). Don't move something there until a second tool needs it.
 - **Nothing in the top-level `tests/` folder may be named `tests`.** `install.sh` links any `<folder>/<folder>` executable, so `tests/tests` would be installed as a tool. A `tests` folder inside a tool is safe.
 
 ## Writing `tests/run`
@@ -103,6 +103,15 @@ Rules for canned fakes:
 - **Don't read from `/dev/tty`.** It fails in CI and can't be tested with a pipe. `adb-shot -n` used to do this and now reads standard input ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)). If input ends before the series does, it exits non-zero.
 - **Don't use `script` to supply a terminal.** Its arguments differ between macOS and Linux, and on macOS it exited 0 without running the prompts, which would be a false pass.
 - `expect` ships with macOS at `/usr/bin/expect`, so it needs no install. Keep expect scripts in the tool's `tests/` folder.
+
+### fzf pickers
+
+Every picker uses fzf when it is on `PATH` and standard input and standard error are terminals, and the `select` menu otherwise ([issue #13](https://github.com/chris-sloan/android-tools/issues/13)). Tests follow these rules:
+
+- **Hide fzf from every check that isn't about fzf.** Each `tests/run` exports `ANDROID_TOOLS_NO_FZF=1`, the tools' switch for keeping the numbered menus. A real fzf on the test machine is then never reached, and the suite behaves the same with or without fzf installed.
+- **Test the fzf path with a fake fzf.** `tests/fakes/fzf` logs its arguments and the lines it was offered, then picks a line by number, or exits 130 (Esc) or 1 (no match). `FAKE_FZF_SEQ` sets what each call does. The real fzf is never run.
+- **Give those checks a terminal with `tests/tty.exp`**, a shared expect script that runs a command on a pty and exits with its code. The terminal check in the tools is real, not bypassed. Each fzf check also turns the switch back on with `ANDROID_TOOLS_NO_FZF=`.
+- **Also test the cases that must not use fzf:** piped input, standard error that isn't a terminal, and `ANDROID_TOOLS_NO_FZF=1` on a terminal.
 
 ## Dependencies
 
@@ -183,7 +192,7 @@ In place:
 - `adb-record/tests/run` and `adb-shot/tests/run`, with the shared fake `adb` in `tests/fakes/adb` and the fake `osascript` and `open` in `adb-shot/tests/fakes` ([issue #8](https://github.com/chris-sloan/android-tools/issues/8)). They don't lint themselves: the top-level `tests/run` runs `bash -n` and `shellcheck` on them. Stopping `adb-record` with Ctrl+C is not tested.
 - `adb-shot -n` reads standard input, and its tests pipe in a full series and a cut-off one ([issue #6](https://github.com/chris-sloan/android-tools/issues/6)).
 - The CI workflow, including the pull request comment (`.github/workflows/tests.yml`, [issue #11](https://github.com/chris-sloan/android-tools/issues/11)).
-- The top-level `tests/run` and `tests/Brewfile` ([issue #9](https://github.com/chris-sloan/android-tools/issues/9)). It lints every tool script, every `tests/run` and `install.sh`, runs `install.sh` against a temp `HOME`, and checks each tool has a README, a `tests/run` and a row in the Tools table. The fakes under `tests/fakes` and `*/tests/fakes` are not linted.
+- The top-level `tests/run` and `tests/Brewfile` ([issue #9](https://github.com/chris-sloan/android-tools/issues/9)). It lints every tool script, every `tests/run` and `install.sh`, runs `install.sh` against a temp `HOME`, and checks each tool has a README, a `tests/run` and a row in the Tools table. The fakes under `tests/fakes` and `*/tests/fakes` are not linted. The tools use fzf when it is installed, and the tests hide it ([fzf pickers](#fzf-pickers)).
 
 Nothing is left to build.
 

@@ -35,7 +35,7 @@ adb-record -T -o ~/Movies demo  # no tap circles, saved to ~/Movies
 
 ## How it works
 
-1. **Picks a device.** One device attached: it's used automatically. More than one: you choose from a list showing model name and serial.
+1. **Picks a device.** One device attached: it's used automatically. More than one: you choose from a list showing model name and serial. With [fzf](../README.md#4-fzf-optional) installed you type to filter and press Enter; without it you get a numbered menu (or set `ANDROID_TOOLS_NO_FZF=1` to keep the numbered menu). Esc cancels.
 2. **Turns on Show taps** (unless `-T`), so every touch appears as a circle in the video. Your previous setting is restored when the script exits, even after Ctrl+C.
 3. **Records** with `adb shell screenrecord` to `/sdcard/screenrecord-<timestamp>.mp4`.
 4. **Stops cleanly.** Enter or Ctrl+C sends an interrupt to `screenrecord` on the device, which lets it finish writing the MP4. Killing it abruptly would leave a file that won't play.

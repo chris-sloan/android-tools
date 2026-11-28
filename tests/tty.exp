@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# Runs a command with a real terminal on its standard input, output and error,
+# and exits with the command's exit code. Used by the tool tests to reach the
+# fzf pickers, which are only used on a terminal. It is shared, so it lives here.
+#
+#   expect tests/tty.exp <command> [arguments...]
+#
+# The command's output is printed as it comes. If the command stops to ask a
+# question that ends in a known prompt, the answer can be given through two
+# environment variables:
+#   TTY_PROMPT   regular expression for the end of the prompt, e.g. "keep it all: "
+#   TTY_REPLY    what to send (Enter is added). Sent every time the prompt shows.
+# With neither set, nothing is ever typed. A command that hangs is stopped
+# after 60 seconds and the exit code is 99.
+#   TTY_BLIND    if set, TTY_REPLY is sent once, one second after the start,
+#                without waiting for a prompt. For a command whose prompts go
+#                to a standard error that is not the terminal, so none shows.
+set timeout 60
+set prompt "@@no prompt@@"
+set reply ""
+if {[info exists env(TTY_PROMPT)]} { set prompt $env(TTY_PROMPT) }
+if {[info exists env(TTY_REPLY)]} { set reply $env(TTY_REPLY) }
+spawn {*}$argv
+if {[info exists env(TTY_BLIND)]} { sleep 1; send "$reply\r" }
+expect {
+  -re $prompt { send "$reply\r"; exp_continue }
+  timeout { puts "\n### timed out"; catch {close}; catch {wait}; exit 99 }
+  eof { }
+}
+lassign [wait] pid spawnid os_error code
+exit $code
