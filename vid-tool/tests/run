@@ -22,6 +22,9 @@ trap 'rm -rf "$work"' EXIT
 stub="$work/stub"
 mkdir -p "$stub" "$work/empty"
 cd "$work" || exit 1
+# The tool reads its config from here, never from the real ~/.config.
+export XDG_CONFIG_HOME="$work/config"
+conf="$XDG_CONFIG_HOME/android-tools/vid-tool.conf"
 
 # A fake ffmpeg that hides encoders matching $HIDE from 'ffmpeg -encoders',
 # and passes everything else to the real one. Simulates a build without them.
@@ -51,8 +54,9 @@ echo "not a video" > notes.txt
 
 # --- Helpers ----------------------------------------------------------------------
 pass=0; fail=0; skip=0
+out=""
 run() {   # label, expected exit code, command...
-  local label=$1 want=$2 out code r; shift 2
+  local label=$1 want=$2 code r; shift 2
   out=$("$@" </dev/null 2>&1); code=$?
   if [[ $code == "$want" ]]; then pass=$((pass+1)); r=PASS; else fail=$((fail+1)); r=FAIL; fi
   echo "=== $r [$label] exit=$code (want $want)"
@@ -145,6 +149,48 @@ HIDE=' aac' run "no aac: pcm audio dropped" 0 T -c -o na clip.mov;  facts na/cli
 HIDE=' aac' run "no aac: aac audio copied" 0 T -c -o na clip.mp4;   facts na/clip-compressed-2.mp4
 run "no ffmpeg" 1 env PATH="$work/empty" /bin/bash "$tool" -c clip.mp4
 export PATH=$realpath_env
+
+# --- Config file --------------------------------------------------------------------------
+has() { grep -qF -- "$1" <<<"$out"; }
+# setconf <lines...>: write the config file, one argument per line.
+setconf() { mkdir -p "$(dirname "$conf")"; printf '%s\n' "$@" > "$conf"; }
+rm -f "$conf"
+run "no config file is fine" 0 T -c -o cfgout clip.mp4;  check 'has "quality 23"'
+setconf '# my settings' '' 'mp4_crf = 35' 'webm_maxw="200"'
+run "config overrides the defaults" 0 T -c -o cfgout clip.mp4
+check 'has "quality 35" && [[ -f cfgout/clip-compressed-2.mp4 ]]'
+run "config value used by -w" 0 T -w -o cfgout clip.mp4;  check 'has "at most 200px wide"'
+run "an option beats the config" 0 T -c -q 30 -W 300 -o cfgout clip.mp4
+check 'has "quality 30" && has "at most 300px wide" && ! has "quality 35"'
+setconf 'indir=~/Pics'
+run "~ at the start of a value" 0 T -h;                  check 'has "$HOME/Pics. The original"'
+setconf 'indir=$HOME/Pics'
+run "\$HOME at the start of a value" 0 T -h;             check 'has "$HOME/Pics. The original"'
+setconf 'mp4_crf=35' 'speed=3'
+run "unknown setting" 1 T -c -o cfgout clip.mp4
+check 'has "$conf, line 2: unknown setting \"speed\"."'
+setconf 'mp4_crf=35' 'just some words'
+run "malformed line" 1 T -c clip.mp4;                    check 'has "$conf, line 2: expected NAME=value"'
+setconf 'indir="oops'
+run "unclosed quote" 1 T -c clip.mp4;                    check 'has "$conf, line 1: indir has an opening quote"'
+setconf '' 'mp4_crf=99'
+run "bad quality" 1 T -c clip.mp4
+check 'has "$conf, line 2: mp4_crf needs a whole number from 0 to 63 (got \"99\")."'
+setconf 'fix_fps=0'
+run "bad frame rate" 1 T -f clip.mp4;                    check 'has "$conf, line 1: fix_fps needs a frame rate"'
+setconf 'webm_maxw=8'
+run "bad width" 1 T -w clip.mp4;                         check 'has "webm_maxw needs a whole number from 16 to"'
+setconf 'size_overhead=100'
+run "bad overhead" 1 T -c clip.mp4;                      check 'has "size_overhead needs a whole number from 0 to 99"'
+setconf 'pick_max=lots'
+run "bad count" 1 T -i;                                  check 'has "pick_max needs a whole number"'
+setconf 'indir='
+run "empty indir" 1 T -i;                                check 'has "indir can'"'"'t be empty"'
+setconf 'mp4_crf=35'
+run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf"'
+rm -f "$conf"
+XDG_CONFIG_HOME='' HOME=$work/home run "-h without XDG_CONFIG_HOME" 0 T -h
+check 'has "Config file: $work/home/.config/android-tools/vid-tool.conf"'
 
 # --- Menus and prompts (through a real terminal) ------------------------------------------
 if command -v expect >/dev/null; then

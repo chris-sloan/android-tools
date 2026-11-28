@@ -30,6 +30,9 @@ cd "$work" || exit 1
 export HOME="$work/home"
 export FAKE_LOG="$work/fake.log" FAKE_STATE="$work"
 export PATH="$shared:$PATH"
+# The tool reads its config from here, never from the real ~/.config.
+export XDG_CONFIG_HOME="$work/config"
+conf="$XDG_CONFIG_HOME/android-tools/adb-record.conf"
 
 # --- Helpers ----------------------------------------------------------------------
 pass=0; fail=0
@@ -119,6 +122,41 @@ INPUT='2\n' FAKE_ADB_DEVICES=$two run "two devices, 2 piped to the menu" 0 T -T 
 check 'logged "adb -s SERIALBBB shell screenrecord"'
 INPUT='9\nx\n1\n' FAKE_ADB_DEVICES=$two run "two devices, bad answers then 1" 0 T -T -o vids third
 check 'logged "adb -s SERIALAAA shell screenrecord"'
+
+# --- Config file ------------------------------------------------------------------------
+# setconf <lines...>: write the config file, one argument per line.
+setconf() { mkdir -p "$(dirname "$conf")"; printf '%s\n' "$@" > "$conf"; }
+rm -f "$conf"
+run "no config file is fine" 0 T -o vids noconf;         check '[[ -f vids/noconf.mp4 ]] && logged "--time-limit 0 "'
+setconf '# my settings' '' 'limit = 25' 'show_taps="0"' "outdir='$work/cfgvids'"
+run "config overrides the defaults" 0 T cfg
+check 'logged "--time-limit 25 /sdcard/" && ! logged "show_touches" && [[ -f cfgvids/cfg.mp4 ]]'
+run "an option beats the config" 0 T -l 7 -t -o vids cfg2
+check 'logged "--time-limit 7 /sdcard/" && logged "settings put system show_touches 1" && [[ -f vids/cfg2.mp4 ]]'
+setconf 'outdir=$HOME/Movies'
+run "\$HOME at the start of a value" 0 T cfg3;           check '[[ -f "$HOME/Movies/cfg3.mp4" ]]'
+setconf 'outdir=~/Clips'
+run "~ at the start of a value" 0 T cfg4;                check '[[ -f "$HOME/Clips/cfg4.mp4" ]]'
+setconf 'limit=25' 'speed=3'
+run "unknown setting" 1 T -o vids x
+check 'has "$conf, line 2: unknown setting \"speed\"." && ! logged "screenrecord"'
+setconf 'limit=25' 'just some words'
+run "malformed line" 1 T -o vids x;                      check 'has "$conf, line 2: expected NAME=value"'
+setconf 'outdir="oops'
+run "unclosed quote" 1 T -o vids x;                      check 'has "$conf, line 1: outdir has an opening quote"'
+setconf '' 'limit=soon'
+run "bad number" 1 T -o vids x
+check 'has "$conf, line 2: limit needs a whole number" && ! logged "screenrecord"'
+setconf 'limit=181'
+run "limit over 180" 1 T -o vids x;                      check 'has "limit needs a whole number of seconds from 0 to 180"'
+setconf 'show_taps=yes'
+run "bad flag" 1 T -o vids x;                            check 'has "$conf, line 1: show_taps needs 0 or 1"'
+setconf 'outdir='
+run "empty outdir" 1 T -o vids x;                        check 'has "outdir can'"'"'t be empty"'
+setconf 'limit=25'
+run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf"'
+rm -f "$conf"
+XDG_CONFIG_HOME='' run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/adb-record.conf"'
 
 # --- Lint -------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"

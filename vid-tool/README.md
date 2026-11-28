@@ -160,7 +160,7 @@ ffmpeg: /opt/homebrew/bin/ffmpeg
 
 ## Changing the defaults
 
-Edit the block at the top of the script:
+The built-in defaults are the block at the top of the script:
 
 ```bash
 indir="$HOME/Desktop"   # folder the file picker lists when no file is given
@@ -177,7 +177,24 @@ min_kbps_per_mpx=300    # -s: ask first if the video gets less than this many
                         #     kb/s per million pixels (a rough quality floor)
 ```
 
-Command-line options override these for a single run.
+To change them for good, use the config file below. Don't edit the script: your edits get in the way when you update. Command-line options override both for a single run.
+
+## Config file
+
+vid-tool reads `~/.config/android-tools/vid-tool.conf` after its built-in defaults, or the same path under `$XDG_CONFIG_HOME` if you set it. `vid-tool -h` prints the exact path. The file is optional, and updates and `install.sh` never create, change or remove it.
+
+```
+# ~/.config/android-tools/vid-tool.conf
+indir=~/Movies
+mp4_crf=26
+webm_maxw=480
+```
+
+- One `NAME=value` per line. Blank lines and lines starting with `#` are skipped. Comments go on their own line, not after a value.
+- Names are the ones in the block above. Anything else is an error.
+- Numbers are checked like the matching option: `fix_fps` like `-r`, the three `_crf` settings like `-q` (0 to 63), `webm_maxw` like `-W` (16 or more). The rest are whole numbers, and `size_overhead` is 0 to 99.
+- Quotes around a value are optional. `~/`, `$HOME/` or `${HOME}/` at the start of a value means your home folder. Nothing else is expanded, and the file is never run as a script.
+- A bad line stops vid-tool with a message naming the file, the line and the setting.
 
 ## Notes and limits
 

@@ -8,6 +8,55 @@ show_taps=1             # 1 = show taps while recording, 0 = don't
 limit=0                 # seconds, max 180; 0 = unlimited (Android 14+, else 180)
 outdir="$HOME/Desktop"  # where videos are saved
 
+# --- Config file (overrides the defaults above; updates never touch it) -------
+# Lines of NAME=value. Blank lines and lines starting with # are skipped. A
+# value may be in "double" or 'single' quotes. A leading ~, $HOME or ${HOME}
+# becomes your home folder. Only the names in the defaults block are allowed.
+# The file is read as text, never run as a script.
+die() { echo "$*" >&2; exit 1; }
+conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/android-tools/adb-record.conf"
+conf_names=" show_taps limit outdir "
+
+# check_setting <name> <value>: if the value is no good, print why and return 1.
+check_setting() {
+  case $1 in
+    show_taps) [[ $2 == [01] ]] || { echo "show_taps needs 0 or 1 (got \"$2\")."; return 1; } ;;
+    limit)
+      if [[ ! $2 =~ ^[0-9]+$ ]] || (( ${#2} > 4 || 10#$2 > 180 )); then
+        echo "limit needs a whole number of seconds from 0 to 180 (got \"$2\")."; return 1
+      fi ;;
+    outdir) [[ -n $2 ]] || { echo "outdir can't be empty."; return 1; } ;;
+  esac
+}
+
+load_config() {
+  [[ -f $conf_file ]] || return 0
+  local line n=0 name val err dq='^"(.*)"$' sq="^'(.*)'\$"
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case $line in '' | '#'*) continue ;; esac
+    [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]] ||
+      die "$conf_file, line $n: expected NAME=value (got \"$line\")."
+    name=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    case $conf_names in *" $name "*) ;; *) die "$conf_file, line $n: unknown setting \"$name\"." ;; esac
+    if [[ $val =~ $dq || $val =~ $sq ]]; then
+      val=${BASH_REMATCH[1]}
+    elif [[ $val == [\"\']* ]]; then
+      die "$conf_file, line $n: $name has an opening quote with no closing one."
+    fi
+    case $val in
+      \~ | \~/*) val=$HOME${val:1} ;;
+      '$HOME' | '$HOME/'*) val=$HOME${val:5} ;;
+      '${HOME}' | '${HOME}/'*) val=$HOME${val:7} ;;
+    esac
+    err=$(check_setting "$name" "$val") || die "$conf_file, line $n: $err"
+    printf -v "$name" '%s' "$val"
+  done < "$conf_file"
+}
+load_config
+
 usage() {
   cat <<EOF
 Usage: adb-record [-T] [-l seconds] [-o dir] [name]
@@ -26,6 +75,9 @@ restored afterwards.
   -h          Show this help
 
 Press Enter or Ctrl+C to stop recording.
+
+Config file: $conf_file
+Settings there (show_taps, limit, outdir) replace the defaults; options win.
 EOF
 }
 

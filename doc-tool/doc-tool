@@ -16,6 +16,74 @@ page_limit=20    # -a, -n: how many pages to show (-m). 0 = all
 ignore_re=""     # -x: skip commits whose message matches this, e.g.
                  #     "reformat|bulk rename|^chore". Empty = skip none.
 
+# --- Config file (overrides the defaults above; updates never touch it) -------
+# Lines of NAME=value. Blank lines and lines starting with # are skipped. A
+# value may be in "double" or 'single' quotes. A leading ~, $HOME or ${HOME}
+# becomes your home folder. Only the names in the defaults block are allowed.
+# The file is read as text, never run as a script.
+die() { echo "$*" >&2; exit 1; }
+
+# "6m" -> seconds. 1 month = 30 days, 1 year = 365 days.
+age_secs() {
+  local n=${1%?} unit=${1: -1}
+  [[ $1 =~ ^[0-9]+[dwmy]$ ]] || return 1
+  case $unit in
+    d) echo $(( n * 86400 )) ;;
+    w) echo $(( n * 7 * 86400 )) ;;
+    m) echo $(( n * 30 * 86400 )) ;;
+    y) echo $(( n * 365 * 86400 )) ;;
+  esac
+}
+
+conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/android-tools/doc-tool.conf"
+conf_names=" report_age report_dir gone page_limit ignore_re "
+
+# check_setting <name> <value>: if the value is no good, print why and return 1.
+# The rules are the ones the matching options use (-O, -m, -x).
+check_setting() {
+  local rc=0
+  case $1 in
+    report_age)
+      age_secs "$2" >/dev/null || { echo "report_age needs an age like 30d, 8w, 6m or 2y (got \"$2\")."; return 1; } ;;
+    page_limit)
+      if [[ ! $2 =~ ^[0-9]+$ ]] || (( ${#2} > 7 )); then
+        echo "page_limit needs a whole number of pages, or 0 for all (got \"$2\")."; return 1
+      fi ;;
+    ignore_re)
+      # grep exits 2 on a bad pattern, 1 on no match.
+      echo | grep -qE "$2" 2>/dev/null || rc=$?
+      (( rc != 2 )) || { echo "ignore_re needs a valid extended regex (got \"$2\")."; return 1; } ;;
+  esac
+}
+
+load_config() {
+  [[ -f $conf_file ]] || return 0
+  local line n=0 name val err dq='^"(.*)"$' sq="^'(.*)'\$"
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case $line in '' | '#'*) continue ;; esac
+    [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]] ||
+      die "$conf_file, line $n: expected NAME=value (got \"$line\")."
+    name=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    case $conf_names in *" $name "*) ;; *) die "$conf_file, line $n: unknown setting \"$name\"." ;; esac
+    if [[ $val =~ $dq || $val =~ $sq ]]; then
+      val=${BASH_REMATCH[1]}
+    elif [[ $val == [\"\']* ]]; then
+      die "$conf_file, line $n: $name has an opening quote with no closing one."
+    fi
+    case $val in
+      \~ | \~/*) val=$HOME${val:1} ;;
+      '$HOME' | '$HOME/'*) val=$HOME${val:5} ;;
+      '${HOME}' | '${HOME}/'*) val=$HOME${val:7} ;;
+    esac
+    err=$(check_setting "$name" "$val") || die "$conf_file, line $n: $err"
+    printf -v "$name" '%s' "$val"
+  done < "$conf_file"
+}
+load_config
+
 usage() {
   cat <<EOF
 Usage: doc-tool [-a | -n | -u | -r | -R] [-s text] [-b author] [-g] [-O age]
@@ -42,8 +110,8 @@ What to show (pick one; left out: a menu asks, or -a when not in a terminal):
 Filters (work with every mode):
   -s text       Only pages whose name or contents contain this text
   -b author     Only pages this person has edited (part of a name or email)
-  -g            Only pages whose editors have all left (the gone list at
-                the top of doc-tool)
+  -g            Only pages whose editors have all left (the gone list in
+                the config file or at the top of doc-tool)
   -O age        Only pages not edited for this long: 30d, 8w, 6m or 2y.
                 With -r and -R, the age that counts as stale.
   -x pattern    Skip commits whose message matches this pattern (extended
@@ -59,10 +127,11 @@ Other:
   -h            Show this help
 
 Dates are each page's last commit, not the file's date on disk.
+
+Config file: $conf_file
+Settings there replace the defaults at the top of doc-tool; options win.
 EOF
 }
-
-die() { echo "$*" >&2; exit 1; }
 
 # "1 page", "3 pages"
 pages() { if (( $1 == 1 )); then echo "1 page"; else echo "$1 pages"; fi; }
@@ -103,18 +172,6 @@ dir=${1:-.}
 
 command -v git >/dev/null || die "doc-tool needs git. Install it with: xcode-select --install"
 
-# "6m" -> seconds. 1 month = 30 days, 1 year = 365 days.
-age_secs() {
-  local n=${1%?} unit=${1: -1}
-  [[ $1 =~ ^[0-9]+[dwmy]$ ]] || return 1
-  case $unit in
-    d) echo $(( n * 86400 )) ;;
-    w) echo $(( n * 7 * 86400 )) ;;
-    m) echo $(( n * 30 * 86400 )) ;;
-    y) echo $(( n * 365 * 86400 )) ;;
-  esac
-}
-
 if [[ -n $age ]]; then
   age_secs "$age" >/dev/null || die "-O needs an age like 30d, 8w, 6m or 2y (got \"$age\")."
 fi
@@ -123,7 +180,7 @@ age_secs "$report_age" >/dev/null || die "report_age at the top of doc-tool must
 [[ $limit =~ ^[0-9]+$ ]] || die "-m needs a number of pages, e.g. -m 20, or -m 0 for all (got \"$limit\")."
 if [[ -n $save && $mode != r && $mode != R ]]; then die "-f only works with -r and -R."; fi
 if (( only_gone )) && [[ -z $gone ]]; then
-  die "-g needs the people who have left: set gone=\"...\" at the top of doc-tool."
+  die "-g needs the people who have left: set gone=\"...\" in $conf_file or at the top of doc-tool."
 fi
 
 if [[ -n $ignore_re ]]; then ignores=("$ignore_re" "${ignores[@]}"); fi

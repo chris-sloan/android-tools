@@ -25,6 +25,9 @@ cd "$work" || exit 1
 export HOME="$work/home"
 export FAKE_LOG="$work/fake.log" FAKE_STATE="$work"
 export PATH="$here/fakes:$shared:$PATH"
+# The tool reads its config from here, never from the real ~/.config.
+export XDG_CONFIG_HOME="$work/config"
+conf="$XDG_CONFIG_HOME/android-tools/adb-shot.conf"
 
 # --- Helpers ----------------------------------------------------------------------
 pass=0; fail=0; skip=0
@@ -121,6 +124,41 @@ run "-n 2: no input at all" 1 T -C -n 2 -o out none
 check 'has "Input ended after 0 of 2 shots" && [[ ! -e out/none-1.png ]]'
 INPUT='\n' run "-n 1 needs no input" 0 T -C -n 1 -o out single
 check '[[ -f out/single.png ]]'
+
+# --- Config file ------------------------------------------------------------------------
+# setconf <lines...>: write the config file, one argument per line.
+setconf() { mkdir -p "$(dirname "$conf")"; printf '%s\n' "$@" > "$conf"; }
+rm -f "$conf"
+run "no config file is fine" 0 T -o out noconf;          check 'png out/noconf.png && has "Copied to clipboard."'
+setconf '# my settings' '' 'copy = 0' 'open_after="1"' "outdir='$work/cfgout'" 'delay=1'
+run "config overrides the defaults" 0 T cfg
+check 'png cfgout/cfg.png && ! logged "osascript" && logged "open $work/cfgout/cfg.png"'
+run "an option beats the config" 0 T -c -o out cfg2
+check 'png out/cfg2.png && logged "osascript" && has "Copied to clipboard."'
+setconf 'copy=0'
+run "-c beats copy=0 and -C beats copy=1" 0 T -c -o out cfg3;  check 'logged "osascript"'
+setconf 'outdir=$HOME/Pics'
+run "\$HOME at the start of a value" 0 T -C cfg4;        check 'png "$HOME/Pics/cfg4.png"'
+setconf 'outdir=~/Shots'
+run "~ at the start of a value" 0 T -C cfg5;             check 'png "$HOME/Shots/cfg5.png"'
+setconf 'copy=0' 'speed=3'
+run "unknown setting" 1 T -o out x
+check 'has "$conf, line 2: unknown setting \"speed\"." && ! logged "screencap"'
+setconf 'copy=0' 'just some words'
+run "malformed line" 1 T -o out x;                       check 'has "$conf, line 2: expected NAME=value"'
+setconf 'outdir="oops'
+run "unclosed quote" 1 T -o out x;                       check 'has "$conf, line 1: outdir has an opening quote"'
+setconf '' 'delay=soon'
+run "bad number" 1 T -o out x
+check 'has "$conf, line 2: delay needs a whole number" && ! logged "screencap"'
+setconf 'copy=2'
+run "bad flag" 1 T -o out x;                             check 'has "$conf, line 1: copy needs 0 or 1"'
+setconf 'outdir='
+run "empty outdir" 1 T -o out x;                         check 'has "outdir can'"'"'t be empty"'
+setconf 'delay=2'
+run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf" && has "(default 2)"'
+rm -f "$conf"
+XDG_CONFIG_HOME='' run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/adb-shot.conf"'
 
 # --- Lint -------------------------------------------------------------------------------
 run "bash -n" 0 bash -n "$tool"

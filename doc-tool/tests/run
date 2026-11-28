@@ -35,6 +35,9 @@ export PATH="$fakes:$PATH" FAKE_LOG="$work/fake.log" FAKE_CLIP="$work/clip.txt"
 # Reports save to $HOME/Desktop by default, so keep them out of the real one.
 export HOME="$work/home"
 mkdir -p "$HOME"
+# The tool reads its config from here, never from the real ~/.config.
+export XDG_CONFIG_HOME="$work/config"
+conf="$XDG_CONFIG_HOME/android-tools/doc-tool.conf"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 # --- Test repos -------------------------------------------------------------------
@@ -268,6 +271,45 @@ check 'has "make the report folder"'
 sed 's/^report_dir=.*/report_dir=""/' "$tool" > "$work/nosave"
 run "report_dir empty: nothing saved" 0 /bin/bash "$work/nosave" -r -C "$wiki"
 check '! has "Saved to" && [[ ! -e "$HOME/Desktop/wiki dir-status-$day-3.txt" ]]'
+
+# --- Config file --------------------------------------------------------------------------
+# setconf <lines...>: write the config file, one argument per line.
+setconf() { mkdir -p "$(dirname "$conf")"; printf '%s\n' "$@" > "$conf"; }
+rm -f "$conf"
+run "no config file is fine" 0 T -a "$wiki";             check 'has "8 pages." && ! has "Showing"'
+setconf '# my settings' '' 'page_limit = 2' 'ignore_re="^chore"' 'report_age=2y'
+run "config sets page_limit" 0 T -a "$wiki";             check 'has "Showing 2 of 8 pages."'
+run "config sets ignore_re" 0 T -a -m 0 "$wiki"
+check 'grep -q "2020-06-01  Bob Dev            releases/v1.md" <<<"$out"'
+run "config sets report_age" 0 T -r -C "$wiki";          check 'has "Not edited in 2 years:"'
+run "an option beats the config" 0 T -a -m 3 -O 1y "$wiki"; check 'has "Showing 3 of" && has "not edited in 1 year"'
+run "-O beats report_age" 0 T -r -C -O 6m "$wiki";       check 'has "Not edited in 6 months:"'
+setconf 'gone="ANN@example||bob dev"' 'ignore_re=^chore'
+run "config sets gone" 0 T -g "$wiki";                   check 'has "4 pages whose editors have all left."'
+setconf 'report_dir=~/Reports'
+run "~ at the start of a value" 0 T -r -C "$wiki"
+check '[[ -f "$HOME/Reports/wiki dir-status-$day.txt" ]] && has "Saved to $HOME/Reports/"'
+setconf 'report_dir=$HOME/More'
+run "\$HOME at the start of a value" 0 T -r -C "$wiki";  check '[[ -f "$HOME/More/wiki dir-status-$day.txt" ]]'
+setconf 'report_dir='
+run "empty report_dir is allowed" 0 T -r -C "$wiki";     check '! has "Saved to"'
+setconf 'page_limit=2' 'speed=3'
+run "unknown setting" 1 T -a "$wiki"
+check 'has "$conf, line 2: unknown setting \"speed\"."'
+setconf 'page_limit=2' 'just some words'
+run "malformed line" 1 T -a "$wiki";                     check 'has "$conf, line 2: expected NAME=value"'
+setconf 'gone="oops'
+run "unclosed quote" 1 T -a "$wiki";                     check 'has "$conf, line 1: gone has an opening quote"'
+setconf '' 'report_age=6months'
+run "bad age" 1 T -r "$wiki";                            check 'has "$conf, line 2: report_age needs an age like 30d"'
+setconf 'page_limit=lots'
+run "bad count" 1 T -a "$wiki";                          check 'has "$conf, line 1: page_limit needs a whole number"'
+setconf 'ignore_re=('
+run "bad pattern" 1 T -a "$wiki";                        check 'has "$conf, line 1: ignore_re needs a valid extended regex"'
+setconf 'page_limit=5'
+run "-h shows the config path" 0 T -h;                   check 'has "Config file: $conf" && has "5; 0 shows them all"'
+rm -f "$conf"
+XDG_CONFIG_HOME='' run "-h without XDG_CONFIG_HOME" 0 T -h; check 'has "Config file: $HOME/.config/android-tools/doc-tool.conf"'
 
 # --- Prompts (need a terminal, so expect) -------------------------------------------------
 if [[ -x /usr/bin/expect ]]; then

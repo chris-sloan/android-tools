@@ -44,7 +44,7 @@ adb-record -T -o ~/Movies demo  # no tap circles, saved to ~/Movies
 
 ## Changing the defaults
 
-Edit the block at the top of the script:
+The built-in defaults are the block at the top of the script:
 
 ```bash
 show_taps=1             # 1 = show taps while recording, 0 = don't
@@ -52,7 +52,22 @@ limit=0                 # seconds, max 180; 0 = unlimited (Android 14+, else 180
 outdir="$HOME/Desktop"  # where videos are saved
 ```
 
-Command-line options override these for a single run.
+To change them for good, use the config file below. Don't edit the script: your edits get in the way when you update. Command-line options override both for a single run.
+
+## Config file
+
+adb-record reads `~/.config/android-tools/adb-record.conf` after its built-in defaults, or the same path under `$XDG_CONFIG_HOME` if you set it. `adb-record -h` prints the exact path. The file is optional, and updates and `install.sh` never create, change or remove it.
+
+```
+# ~/.config/android-tools/adb-record.conf
+limit=60
+outdir=~/Movies/bugs
+```
+
+- One `NAME=value` per line. Blank lines and lines starting with `#` are skipped. Comments go on their own line, not after a value.
+- Names are the ones in the block above. Anything else is an error.
+- Quotes around a value are optional. `~/`, `$HOME/` or `${HOME}/` at the start of a value means your home folder. Nothing else is expanded, and the file is never run as a script.
+- A bad line stops adb-record with a message naming the file, the line and the setting.
 
 ## Notes and limits
 

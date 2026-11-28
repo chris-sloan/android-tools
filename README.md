@@ -88,6 +88,18 @@ doc-tool opens pages in glow. Without it, doc-tool still lists pages, authors an
 
 This links each tool into `~/.local/bin`, which must be on your PATH. Because they're links, edits to the scripts here take effect straight away.
 
+`install.sh` only makes links. It never creates, changes or removes a [config file](#config-files).
+
+### Config files
+
+Each tool has a block of defaults at the top of its script. To change them without editing the script, put `NAME=value` lines in `~/.config/android-tools/<tool>.conf` (or under `$XDG_CONFIG_HOME` if you set it). The file is optional, is read after the built-in defaults, and command-line options still win. Updating this repo never touches it. `<tool> -h` prints the exact path, and each tool's README has an example.
+
+```
+# ~/.config/android-tools/adb-shot.conf
+outdir=~/Pictures/shots
+copy=0
+```
+
 ### 5. Device
 
 Turn on **Developer options** (tap **Settings → About phone → Build number** 7 times), then **USB debugging**. Plug the phone in and accept the prompt. Check with `adb devices`.
@@ -107,14 +119,17 @@ Turn on **Developer options** (tap **Settings → About phone → Build number**
 
 Run `tests/run` for the repo-wide checks, or `<tool>/tests/run` for one tool. See [docs/testing.md](docs/testing.md).
 
+Your own settings are not in this folder. They live in `~/.config/android-tools/<tool>.conf`.
+
 ## Adding a tool
 
 1. Make a folder named after the tool, with an executable script of the same name inside: `my-tool/my-tool`.
 2. Start the script with a defaults block and a `-h` help message, like the existing tools.
-3. Add a `README.md` in its folder: a one-line summary, usage (including argument order), defaults, examples, how it works, and troubleshooting. Keep it self-contained; don't describe one tool's behaviour in terms of another's.
-4. Add a row to the **Tools** table and a few lines to the **Quick reference** above, including one example that uses every option.
-5. Add tests in `my-tool/tests/run`. See [docs/testing.md](docs/testing.md).
-6. Run `./install.sh` to put it on your PATH.
+3. Right after the defaults block, load the optional config file `${XDG_CONFIG_HOME:-$HOME/.config}/android-tools/my-tool.conf`. Copy `die`, `load_config` and the `conf_file` line from an existing tool. Then set `conf_names` to the names in your defaults block and write `check_setting`, which rejects bad values using the same rules as the matching command-line options. `load_config` parses the file, so it is never run as a script, and each error names the file, the line and the setting. Make `-h` print `$conf_file`.
+4. Add a `README.md` in its folder: a one-line summary, usage (including argument order), defaults, a **Config file** section with an example, examples, how it works, and troubleshooting. Keep it self-contained; don't describe one tool's behaviour in terms of another's.
+5. Add a row to the **Tools** table and a few lines to the **Quick reference** above, including one example that uses every option.
+6. Add tests in `my-tool/tests/run`. See [docs/testing.md](docs/testing.md). Set `XDG_CONFIG_HOME` to a temp folder and cover a value set by the config file, an option beating it, a missing file, an unknown setting, a bad value and `-h` showing the path.
+7. Run `./install.sh` to put it on your PATH. It only makes links and never touches config files.
 
 ## Licence
 
